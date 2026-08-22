@@ -138,6 +138,114 @@ def to_markdown(result: AnalysisResult) -> str:
                     add(f"- {item}")
                 add("")
 
+    # --- project profile -------------------------------------------------
+    if result.profile is not None and result.profile.has_content:
+        add("## Project profile (DexScreener)")
+        add("")
+        if result.profile.description:
+            add(f"> {result.profile.description}")
+            add("")
+        for link in result.profile.links[:8]:
+            add(f"- {link.label or link.kind.title()}: {link.url}")
+        add("")
+
+    # --- multi-LLM ensemble ----------------------------------------------
+    ensemble = result.ensemble
+    if ensemble is not None and ensemble.ok and ensemble.consensus is not None:
+        consensus = ensemble.consensus
+        add(f"## Multi-LLM ensemble ({consensus.model_count} model(s))")
+        add("")
+        add(f"**Consensus: {consensus.decision_label} — {consensus.overall_score:.0f}/100** "
+            f"(confidence {consensus.confidence * 100:.0f}%, agreement {consensus.agreement * 100:.0f}%)")
+        add("")
+        if ensemble.blended_score is not None:
+            add(f"Blended with the rules engine: **{ensemble.blended_score:.0f}/100** "
+                f"({config.DECISION_LABELS.get(ensemble.blended_decision, ensemble.blended_decision)}, "
+                f"{ensemble.blend_weight * 100:.0f}% LLM weight)")
+            add("")
+
+        add("| Model | Score | Decision | Confidence | Latency |")
+        add("| --- | ---: | --- | ---: | ---: |")
+        for verdict in ensemble.verdicts:
+            if verdict.ok:
+                add(f"| {verdict.label} | {verdict.overall_score:.0f} | {verdict.decision_label} | "
+                    f"{verdict.confidence * 100:.0f}% | {verdict.latency_ms / 1000:.1f}s |")
+            else:
+                add(f"| {verdict.label} | — | failed | — | {verdict.error} |")
+        add("")
+
+        add("| Dimension | " + " | ".join(v.provider for v in ensemble.successful) + " | Consensus |")
+        add("| --- | " + " | ".join("---:" for _ in ensemble.successful) + " | ---: |")
+        for dim in config.LLM_DIMENSIONS:
+            cells = " | ".join(f"{v.dimension_scores.get(dim, 0):.1f}" for v in ensemble.successful)
+            add(f"| {config.COMPONENT_LABELS.get(dim, dim.title())} | {cells} | "
+                f"{consensus.dimension_scores.get(dim, 0):.1f} |")
+        add("")
+
+        if consensus.corroborated_rug_flags:
+            add("**Rug flags raised by 2+ models**")
+            add("")
+            for flag in consensus.corroborated_rug_flags:
+                add(f"- 🚩 {flag}")
+            add("")
+        single = [f for f in consensus.rug_flags if f not in consensus.corroborated_rug_flags]
+        if single:
+            add("**Rug flags raised by one model (unverified)**")
+            add("")
+            for flag in single:
+                add(f"- {flag}")
+            add("")
+
+        if consensus.dissent:
+            add("**Disagreement between models**")
+            add("")
+            for note in consensus.dissent:
+                add(f"- {note}")
+            add("")
+
+        if consensus.lore_summary:
+            add(f"**Narrative.** {consensus.lore_summary}")
+            add("")
+        if consensus.rationale:
+            add(f"**Consensus rationale.** {consensus.rationale}")
+            add("")
+
+        for title, items in (("Model positives", consensus.key_positives), ("Model risks", consensus.key_risks)):
+            if items:
+                add(f"**{title}**")
+                add("")
+                for item in items:
+                    add(f"- {item}")
+                add("")
+
+        for verdict in ensemble.successful:
+            add(f"<details><summary>{verdict.label} full verdict</summary>")
+            add("")
+            if verdict.lore_summary:
+                add(verdict.lore_summary)
+                add("")
+            if verdict.rationale:
+                add(f"_{verdict.rationale}_")
+                add("")
+            for label, items in (("Positives", verdict.key_positives), ("Risks", verdict.key_risks),
+                                 ("Rug flags", verdict.rug_flags)):
+                if items:
+                    add(f"{label}:")
+                    add("")
+                    for item in items:
+                        add(f"- {item}")
+                    add("")
+            add("</details>")
+            add("")
+    elif ensemble is not None:
+        add("## Multi-LLM ensemble")
+        add("")
+        add("No model verdicts were produced.")
+        add("")
+        for note in ensemble.notes:
+            add(f"- {note}")
+        add("")
+
     # --- positives / risks ----------------------------------------------
     if result.scorecard:
         if result.scorecard.positives:

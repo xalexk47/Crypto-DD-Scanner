@@ -8,7 +8,14 @@ python-dotenv>=1.0,<2.0     # loads .env for optional API keys
 pytest>=8.0,<10.0
 
 # --- optional LLM providers -------------------------------------------------
-# Install only what you plan to use, then set MEMEDD_LLM_PROVIDER in .env.
-# anthropic>=0.40           # Claude   (MEMEDD_LLM_PROVIDER=anthropic)
-# openai>=1.40              # GPT      (MEMEDD_LLM_PROVIDER=openai)
-#                           # Grok too (MEMEDD_LLM_PROVIDER=xai, same SDK)
+# Needed only for the narrative layer and the multi-LLM ensemble. Install the
+# ones you have keys for; providers without a key or SDK are skipped with a
+# reason shown in the sidebar, and the app runs fine without any of them.
+#
+#   anthropic>=0.40         # Claude          -> ANTHROPIC_API_KEY
+#   openai>=1.40            # GPT             -> OPENAI_API_KEY
+#                           # and Grok (xAI)  -> XAI_API_KEY (same SDK,
+#                           #   pointed at https://api.x.ai/v1)
+#
+# For the full three-model ensemble:
+#   pip install anthropic openai

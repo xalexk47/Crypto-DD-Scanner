@@ -6,8 +6,9 @@ import json
 
 import pytest
 
-from src import analyzer, config, data_fetchers, history, report
+from src import analyzer, config, data_fetchers, history, llm_analyzers, report
 from src.data_fetchers import FetchError
+from tests.fake_llm import FakeAnthropicClient, FakeOpenAIClient, verdict_json
 from tests.fixtures import (
     NOW_MS,
     TOKEN_ADDRESS,
@@ -15,6 +16,7 @@ from tests.fixtures import (
     dexscreener_token_response,
     goplus_honeypot_response,
     goplus_response,
+    token_profiles_response,
 )
 
 
@@ -30,6 +32,8 @@ def stub_apis(monkeypatch):
     """Route both upstreams through one fake transport."""
 
     def route(url, params=None, retries=None):
+        if "token-profiles" in url:
+            return token_profiles_response()
         if "dexscreener" in url or "/latest/dex/" in url or "/tokens/v1/" in url:
             return dexscreener_token_response()
         return goplus_response()
@@ -235,3 +239,122 @@ class TestHistory:
         history.record(analyzer.analyze_token(TOKEN_ADDRESS), db_path=db)
         history.clear(db_path=db)
         assert history.recent(db_path=db) == []
+
+
+class TestProfileEnrichmentInPipeline:
+    def test_profile_is_attached_and_folded_into_the_snapshot(self, stub_apis):
+        result = analyzer.analyze_token(TOKEN_ADDRESS)
+
+        assert result.profile is not None
+        assert result.profile.description.startswith("Brett is Pepe's")
+        # The fixture pair already has socials; the profile must not duplicate them.
+        twitter = [link for link in result.snapshot.socials if link.kind == "twitter"]
+        assert len(twitter) == 1
+
+    def test_profile_outage_does_not_break_analysis(self, monkeypatch):
+        def route(url, params=None, retries=None):
+            if "token-profiles" in url:
+                raise FetchError("HTTP 500")
+            if "gopluslabs" in url:
+                return goplus_response()
+            return dexscreener_token_response()
+
+        monkeypatch.setattr(data_fetchers, "_get_json", route)
+        result = analyzer.analyze_token(TOKEN_ADDRESS)
+
+        assert result.ok is True
+        assert result.profile is None
+        assert result.scorecard is not None
+
+
+class TestEnsembleInPipeline:
+    def _settings(self, **kwargs):
+        return config.AppSettings(use_ensemble=True, **kwargs)
+
+    def test_ensemble_is_skipped_unless_enabled(self, stub_apis):
+        assert analyzer.analyze_token(TOKEN_ADDRESS, config.AppSettings()).ensemble is None
+
+    def test_ensemble_runs_and_attaches_to_the_result(self, stub_apis, monkeypatch):
+        clients = {
+            "xai": FakeOpenAIClient(content=verdict_json(score=78, decision="buy")),
+            "anthropic": FakeAnthropicClient(content=verdict_json(score=72, decision="buy")),
+            "openai": FakeOpenAIClient(content=verdict_json(score=66, decision="watch")),
+        }
+        real_run = llm_analyzers.run_ensemble
+        monkeypatch.setattr(
+            analyzer.llm_analyzers, "run_ensemble",
+            lambda *args, **kwargs: real_run(*args, clients=clients, **kwargs),
+        )
+        result = analyzer.analyze_token(TOKEN_ADDRESS, self._settings())
+
+        assert result.ensemble is not None and result.ensemble.ok
+        assert result.ensemble.consensus.model_count == 3
+        assert result.ensemble.blended_score is not None
+        # The deterministic scorecard must remain untouched by the models.
+        assert result.scorecard.composite == analyzer.analyze_token(
+            TOKEN_ADDRESS, config.AppSettings()
+        ).scorecard.composite
+
+    def test_models_receive_the_deterministic_score_to_argue_with(self, stub_apis, monkeypatch):
+        client = FakeOpenAIClient(content=verdict_json())
+        real_run = llm_analyzers.run_ensemble
+        monkeypatch.setattr(
+            analyzer.llm_analyzers, "run_ensemble",
+            lambda *args, **kwargs: real_run(*args, clients={"xai": client}, **kwargs),
+        )
+        analyzer.analyze_token(TOKEN_ADDRESS, self._settings(ensemble_providers=("xai",)))
+
+        prompt = client.calls[0]["messages"][1]["content"]
+        assert "platform_deterministic_score" in prompt
+        assert "dexscreener_profile" in prompt
+
+    def test_no_keys_produces_an_explained_empty_ensemble(self, stub_apis, monkeypatch):
+        for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY"):
+            monkeypatch.setattr(config, name, "")
+        result = analyzer.analyze_token(TOKEN_ADDRESS, self._settings())
+
+        assert result.ok is True                      # analysis still succeeds
+        assert result.ensemble is not None and result.ensemble.ok is False
+        assert any("No LLM providers" in note for note in result.ensemble.notes)
+
+
+class TestEnsembleExport:
+    @pytest.fixture
+    def result_with_ensemble(self, stub_apis, monkeypatch):
+        clients = {
+            "xai": FakeOpenAIClient(content=verdict_json(score=80, decision="buy",
+                                                         rug_flags=["Deployer holds a large bag"])),
+            "anthropic": FakeAnthropicClient(content=verdict_json(score=55, decision="watch",
+                                                                  rug_flags=["Deployer holds a large bag"])),
+        }
+        real_run = llm_analyzers.run_ensemble
+        monkeypatch.setattr(
+            analyzer.llm_analyzers, "run_ensemble",
+            lambda *args, **kwargs: real_run(*args, clients=clients, **kwargs),
+        )
+        return analyzer.analyze_token(
+            TOKEN_ADDRESS, config.AppSettings(use_ensemble=True, ensemble_providers=("xai", "anthropic")),
+        )
+
+    def test_markdown_includes_the_ensemble_section(self, result_with_ensemble):
+        markdown = report.to_markdown(result_with_ensemble)
+
+        assert "## Multi-LLM ensemble" in markdown
+        assert "## Project profile (DexScreener)" in markdown
+        assert "xai/grok-4" in markdown
+        assert "Rug flags raised by 2+ models" in markdown
+        assert "Disagreement between models" in markdown
+
+    def test_json_round_trips_the_ensemble(self, result_with_ensemble):
+        payload = json.loads(report.to_json(result_with_ensemble))
+
+        assert payload["ensemble"]["model_count"] == 2
+        assert len(payload["ensemble"]["verdicts"]) == 2
+        assert payload["ensemble"]["consensus"]["corroborated_rug_flags"]
+        assert payload["profile"]["description"]
+
+    def test_history_stores_a_result_carrying_an_ensemble(self, result_with_ensemble, tmp_path):
+        db = tmp_path / "history.sqlite3"
+        row_id = history.record(result_with_ensemble, db_path=db)
+        payload = history.load(row_id, db_path=db)
+        assert payload["ensemble"]["consensus"]["overall_score"] > 0

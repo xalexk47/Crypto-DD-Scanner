@@ -17,7 +17,7 @@ from typing import List
 import pandas as pd
 import streamlit as st
 
-from src import config, data_fetchers, history, llm, report, ui
+from src import config, data_fetchers, history, llm, llm_analyzers, report, ui
 from src.analyzer import analyze_many, analyze_token, scan
 from src.models import AnalysisResult, ScanCandidate
 from src.utils import fmt_usd, parse_addresses, score_emoji, short_address
@@ -41,21 +41,25 @@ st.set_page_config(
 # reruns instant, the inner one keeps us polite to the upstream APIs.
 @st.cache_data(ttl=config.CACHE_TTL_TOKEN, show_spinner=False)
 def cached_analyze(
-    address: str, chain: str, portfolio_usd: float, risk_profile: str, use_llm: bool, nonce: int
+    address: str, chain: str, portfolio_usd: float, risk_profile: str, use_llm: bool,
+    use_ensemble: bool, providers: tuple, blend_weight: float, nonce: int
 ) -> AnalysisResult:
     """Analyze one address.  ``nonce`` busts the cache on a manual refresh."""
     settings = config.AppSettings(
-        chain=chain, portfolio_usd=portfolio_usd, risk_profile=risk_profile, use_llm=use_llm
+        chain=chain, portfolio_usd=portfolio_usd, risk_profile=risk_profile, use_llm=use_llm,
+        use_ensemble=use_ensemble, ensemble_providers=providers, blend_weight=blend_weight,
     )
     return analyze_token(address, settings)
 
 
 @st.cache_data(ttl=config.CACHE_TTL_TOKEN, show_spinner=False)
 def cached_analyze_many(
-    addresses: List[str], chain: str, portfolio_usd: float, risk_profile: str, use_llm: bool, nonce: int
+    addresses: List[str], chain: str, portfolio_usd: float, risk_profile: str, use_llm: bool,
+    use_ensemble: bool, providers: tuple, blend_weight: float, nonce: int
 ) -> List[AnalysisResult]:
     settings = config.AppSettings(
-        chain=chain, portfolio_usd=portfolio_usd, risk_profile=risk_profile, use_llm=use_llm
+        chain=chain, portfolio_usd=portfolio_usd, risk_profile=risk_profile, use_llm=use_llm,
+        use_ensemble=use_ensemble, ensemble_providers=providers, blend_weight=blend_weight,
     )
     return analyze_many(addresses, settings)
 
@@ -87,6 +91,12 @@ def cached_scan(
         max_results=max_results,
     )
     return scan(filters)
+
+
+@st.cache_data(ttl=config.CACHE_TTL_SCANNER, show_spinner=False)
+def cached_profiles(chain: str, nonce: int):
+    """Latest DexScreener token profiles for one chain."""
+    return data_fetchers.fetch_latest_profiles(chain)
 
 
 # ==========================================================================
@@ -149,8 +159,44 @@ def render_sidebar() -> config.AppSettings:
         use_llm = st.toggle(
             "Use LLM for lore analysis",
             value=False,
-            help="Requires an API key in .env (see README). Falls back to heuristics automatically.",
+            help="Single-model narrative. Requires an API key in .env; falls back to heuristics automatically.",
         )
+
+        st.markdown("#### 🤖 Multi-LLM ensemble")
+        statuses = llm_analyzers.provider_statuses()
+        ready_providers = [s_.provider for s_ in statuses if s_.ready]
+        for status in statuses:
+            label = {"xai": "Grok (xAI)", "anthropic": "Claude", "openai": "GPT"}[status.provider]
+            st.caption(("✅ " if status.ready else "⚪ ") + f"**{label}** — "
+                       + ("ready" if status.ready else status.reason))
+
+        use_ensemble = st.toggle(
+            "Run ensemble on analysis",
+            value=False,
+            disabled=not ready_providers,
+            help=(
+                "Sends the same payload to every ready model in parallel and combines the verdicts."
+                if ready_providers
+                else "Add ANTHROPIC_API_KEY / OPENAI_API_KEY / XAI_API_KEY to .env to enable."
+            ),
+        )
+        selected_providers = tuple(
+            st.multiselect(
+                "Models to query",
+                options=ready_providers,
+                default=ready_providers,
+                format_func=lambda key: {"xai": "Grok", "anthropic": "Claude", "openai": "GPT"}[key],
+                disabled=not use_ensemble,
+            )
+        ) if ready_providers else tuple()
+        blend_weight = st.slider(
+            "LLM weight in blended score",
+            0.0, 1.0, float(config.ENSEMBLE_BLEND_WEIGHT), 0.05,
+            disabled=not use_ensemble,
+            help="0 = rules engine only, 1 = models only. The security veto always wins regardless.",
+        )
+        if use_ensemble and not selected_providers:
+            st.caption("⚠️ Pick at least one model, or the ensemble will be skipped.")
 
         with st.expander("Advanced: score weights"):
             st.caption("Weights are normalised to 100%. Defaults follow the spec.")
@@ -185,6 +231,9 @@ def render_sidebar() -> config.AppSettings:
         risk_profile=risk_profile,
         weights=weights,
         use_llm=use_llm,
+        use_ensemble=bool(use_ensemble and selected_providers),
+        ensemble_providers=selected_providers,
+        blend_weight=blend_weight,
     )
 
 
@@ -208,8 +257,12 @@ def render_result(result: AnalysisResult, settings: config.AppSettings) -> None:
     st.markdown("")
     ui.render_security(result.security)
     st.markdown("")
+    ui.render_profile(result.profile)
     ui.render_narrative(result)
     st.markdown("")
+    if result.ensemble is not None:
+        ui.render_ensemble(result.ensemble, result.scorecard)
+        st.markdown("")
     ui.render_risk_plan(result)
 
     for warning in result.data_warnings:
@@ -239,19 +292,22 @@ def run_analysis(addresses: List[str], settings: config.AppSettings) -> None:
     if not addresses:
         return
     label = addresses[0] if len(addresses) == 1 else f"{len(addresses)} tokens"
-    with st.spinner(f"Fetching market data, running security checks and scoring {label}…"):
+    spinner = f"Fetching market data, running security checks and scoring {label}…"
+    if settings.use_ensemble:
+        spinner = (
+            f"Analyzing {label} and querying "
+            f"{len(settings.ensemble_providers)} model(s) in parallel…"
+        )
+    with st.spinner(spinner):
+        args = (
+            settings.chain, settings.portfolio_usd, settings.risk_profile, settings.use_llm,
+            settings.use_ensemble, tuple(settings.ensemble_providers), settings.blend_weight,
+            st.session_state["cache_nonce"],
+        )
         if len(addresses) == 1:
-            results = [
-                cached_analyze(
-                    addresses[0], settings.chain, settings.portfolio_usd,
-                    settings.risk_profile, settings.use_llm, st.session_state["cache_nonce"],
-                )
-            ]
+            results = [cached_analyze(addresses[0], *args)]
         else:
-            results = cached_analyze_many(
-                addresses, settings.chain, settings.portfolio_usd,
-                settings.risk_profile, settings.use_llm, st.session_state["cache_nonce"],
-            )
+            results = cached_analyze_many(addresses, *args)
     for result in results:
         history.record(result)
     st.session_state["results"] = results
@@ -308,6 +364,10 @@ def tab_analyzer(settings: config.AppSettings) -> None:
                     "Symbol": (r.snapshot.symbol if r.snapshot else "?") or "?",
                     "Score": r.composite,
                     "Decision": r.decision,
+                    "LLM": (
+                        round(r.ensemble.consensus.overall_score, 1)
+                        if r.ensemble and r.ensemble.consensus else None
+                    ),
                     "MCap": fmt_usd(r.snapshot.market_cap) if r.snapshot else "n/a",
                     "Liquidity": fmt_usd(r.snapshot.liquidity_usd) if r.snapshot else "n/a",
                     "Address": short_address(r.address, 8, 6),
@@ -427,6 +487,52 @@ def tab_scanner(settings: config.AppSettings) -> None:
 
     csv = frame.to_csv(index=False).encode("utf-8")
     st.download_button("⬇️ Export scan as CSV", csv, "memedd_scan.csv", "text/csv")
+
+    render_latest_profiles(settings)
+
+
+def render_latest_profiles(settings: config.AppSettings) -> None:
+    """Newest DexScreener token profiles for the selected chain.
+
+    A different discovery angle from the scanner table: these are projects that
+    just claimed their DexScreener page, so they skew brand new and pre-volume.
+    No market filters apply here - that is the point.
+    """
+    chain_label = config.get_chain(settings.chain).label
+    with st.expander(f"🆕 Latest token profiles on {chain_label}"):
+        st.caption(
+            "Live from DexScreener's `/token-profiles/latest/v1` feed — projects that just published "
+            "a profile. Newest first, unfiltered: treat as a lead list, not a buy list."
+        )
+        with st.spinner("Loading latest profiles…"):
+            profiles = cached_profiles(settings.chain, st.session_state["cache_nonce"])
+
+        if not profiles:
+            st.info(f"No recent profiles for {chain_label} in the current feed.", icon="🪪")
+            return
+
+        for index, profile in enumerate(profiles[:12]):
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                links = " · ".join(
+                    f"[{link.label or link.kind.title()}]({link.url})" for link in profile.links[:4]
+                )
+                header = f"**`{short_address(profile.address, 10, 6)}`**"
+                if profile.url:
+                    header = f"**[{short_address(profile.address, 10, 6)}]({profile.url})**"
+                st.markdown(header)
+                if profile.description:
+                    st.caption(profile.description[:260] + ("…" if len(profile.description) > 260 else ""))
+                else:
+                    st.caption("_No description published._")
+                if links:
+                    st.caption(links)
+            with col2:
+                if st.button("Analyze", key=f"profile_{index}", use_container_width=True):
+                    run_analysis([profile.address], settings)
+                    st.session_state["pending_address"] = profile.address
+                    st.success("Analyzed — see the **CA Analyzer** tab.")
+            st.divider()
 
 
 # ==========================================================================

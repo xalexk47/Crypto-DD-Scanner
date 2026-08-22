@@ -122,3 +122,39 @@ def goplus_honeypot_response() -> Dict[str, Any]:
         lp_holders=[{"address": "0xddd4444444444444444444444444444444444444", "tag": "",
                      "is_contract": 0, "balance": "1000", "percent": "1.0", "is_locked": 0}],
     )
+
+
+def token_profile_item(**overrides: Any) -> Dict[str, Any]:
+    """One entry from ``/token-profiles/latest/v1``."""
+    item: Dict[str, Any] = {
+        "url": f"https://dexscreener.com/base/{TOKEN_ADDRESS}",
+        "chainId": "base",
+        "tokenAddress": TOKEN_ADDRESS,
+        "icon": "https://dd.dexscreener.com/ds-data/tokens/base/brett/icon.png",
+        "header": "https://dd.dexscreener.com/ds-data/tokens/base/brett/header.png",
+        "description": "Brett is Pepe's best friend and the mascot of Base.",
+        "links": [
+            {"type": "twitter", "url": "https://x.com/basedbrett"},
+            {"type": "telegram", "url": "https://t.me/basedbrett"},
+            {"label": "Website", "url": "https://basedbrett.com"},
+        ],
+    }
+    item.update(overrides)
+    return item
+
+
+def token_profiles_response() -> list:
+    """The feed: the target token plus entries on other chains to filter out."""
+    return [
+        token_profile_item(),
+        token_profile_item(
+            chainId="solana",
+            tokenAddress="DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+            description="A Solana dog.",
+        ),
+        token_profile_item(
+            tokenAddress="0xB000000000000000000000000000000000000002",
+            description="Another Base token.",
+            links=[],
+        ),
+    ]

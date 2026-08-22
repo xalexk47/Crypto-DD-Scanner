@@ -23,6 +23,11 @@ DexScreener URLs work too) and get, per token:
   **top-10 holder concentration excluding LP and burn wallets**.
 - **Lore & narrative** — a readable narrative summary with themes, bull case and
   bear case. Heuristic by default; swap in Claude/GPT/Grok with one env var.
+- **Multi-LLM ensemble** *(optional)* — the same payload sent to Grok, Claude and
+  GPT **in parallel**, each returning strict JSON, combined into a consensus
+  verdict with an explicit agreement score and dissent notes. See below.
+- **Project profile** — description, icon and links pulled from DexScreener's
+  token-profiles feed, folded into both the report and the LLM payload.
 - **Composite score (0–100)** with a full breakdown and per-pillar reasoning.
 - **Decision** — Strong Buy / Buy / Watch / Pass, with a hard security veto that
   forces Pass on honeypots regardless of how good everything else looks.
@@ -94,6 +99,108 @@ Position sizing is not a fixed percentage — it is derived, in this order:
 
 ---
 
+---
+
+## Multi-LLM ensemble
+
+Optional, off by default, and unlocked by adding any of `XAI_API_KEY`,
+`ANTHROPIC_API_KEY` or `OPENAI_API_KEY` to `.env`. Toggle it in the sidebar.
+
+```
+                 ┌── Grok  (xAI, api.x.ai/v1) ──┐
+ token payload ──┼── Claude (Anthropic) ────────┼──> consensus + agreement
+   (identical)   └── GPT   (OpenAI) ────────────┘     + dissent + blended score
+```
+
+Every model receives **the same structured payload and the same prompt**, in
+parallel, so the wall-clock cost is the slowest model rather than their sum.
+Each returns strict JSON against one shared schema:
+
+```json
+{
+  "overall_score": 0-100,
+  "decision": "strong_buy" | "buy" | "watch" | "pass",
+  "confidence": 0.0-1.0,
+  "dimension_scores": {
+    "security": 0-10, "liquidity": 0-10, "holders": 0-10,
+    "mindshare": 0-10, "lore": 0-10, "catalyst": 0-10
+  },
+  "lore_summary": "2-4 sentence narrative assessment",
+  "key_positives": ["...", "..."],
+  "key_risks": ["...", "..."],
+  "rug_flags": ["...", "..."],
+  "rationale": "concise paragraph"
+}
+```
+
+### How strict JSON is enforced
+
+Each vendor gets its native mechanism, with fallbacks so an older model or SDK
+degrades instead of failing:
+
+| Provider | Primary | Fallback 1 | Fallback 2 |
+| --- | --- | --- | --- |
+| Anthropic | `output_config.format` json_schema | strict tool call | prompt-only JSON |
+| OpenAI / xAI | `response_format` json_schema (strict) | `json_object` | prompt-only JSON |
+
+Whatever arrives is normalized by `coerce_verdict()`, which **repairs** rather
+than rejects the usual model errors — dimensions returned 0-100 instead of
+0-10, confidence as a percentage, `"STRONG BUY"` instead of `strong_buy`, a
+missing dimension. Every repair is recorded on the verdict, and shown in the UI.
+
+### What the ensemble adds over one model
+
+The point is not a smoother average — it is **agreement as a signal**:
+
+- **Consensus** — confidence-weighted mean score and dimension scores.
+- **Agreement (0-100%)** — from the score spread and whether the decisions
+  actually match. Three models at 90/50/20 produce a *low-confidence* consensus,
+  not a confident 53.
+- **Dissent notes** — score spreads ≥25 points, split decisions, and cases where
+  the vote and the averaged score disagree, all surfaced explicitly.
+- **Corroborated rug flags** — a flag raised independently by 2+ models is
+  separated from one model's hunch, and shown in red rather than amber.
+- **Conservative reconciliation** — the consensus decision is the *more
+  conservative* of the weighted vote and the score's own bucket.
+
+### Blending with the rules engine
+
+The deterministic score is never overwritten. The ensemble produces a separate
+blended number (default 35% LLM, adjustable in the sidebar), under two rules
+that are not negotiable:
+
+1. **The security veto wins outright.** A model can be talked out of a honeypot
+   by a good story; the rules engine cannot.
+2. **Models can talk a score down, never rescue one.** The blended decision is
+   held to the more conservative of the blend and the deterministic call.
+
+### Cost note
+
+An ensemble run is three frontier-model calls per token. That is fine for
+deep-diving a shortlist and expensive for scanning — which is why Scanner mode
+ranks on market data only and the ensemble runs on demand, per token.
+
+---
+
+## DexScreener token profiles
+
+`/token-profiles/latest/v1` is the feed of projects that just published a
+DexScreener profile. It is wired in at two points:
+
+- **Enrichment** — on every analysis, the token is looked up in the feed and any
+  description, icon and social links it carries are folded into the snapshot
+  (without overwriting pair data). This is usually the only source of a project
+  description, so it materially improves both the heuristic narrative and the
+  LLM payload.
+- **Discovery** — Scanner mode has a *Latest token profiles* panel listing recent
+  profiles for the selected chain, each with a one-click deep analysis. These
+  skew brand new and pre-volume, so no market filters apply — treat it as a lead
+  list, not a buy list.
+
+The feed is fetched once and cached, so per-token lookups are effectively free.
+
+---
+
 ## Install
 
 Requires **Python 3.11+**.
@@ -134,6 +241,8 @@ python -m pytest tests/ -q
 | Pairs, price, liquidity, volume, socials | [DexScreener](https://docs.dexscreener.com/api/reference) | No |
 | Token security / rug checks | [GoPlus Security](https://docs.gopluslabs.io/reference/api-overview) | No (a key only raises rate limits) |
 | Lore & narrative | Built-in heuristics | No |
+| Project profile / new launches | [DexScreener token profiles](https://docs.dexscreener.com/api/reference) | No |
+| Multi-LLM ensemble | xAI / Anthropic / OpenAI | Yes — optional, any subset |
 
 To add keys, copy the template and edit it:
 
@@ -146,45 +255,55 @@ config resolution lives in `src/config.py` — nothing reads `os.environ` direct
 
 ---
 
-## Adding LLM analysis (Claude / GPT / Grok)
+## Enabling the LLM layers
 
-The narrative layer is already abstracted behind a provider interface in
-`src/llm.py`, and scaffolding for all three vendors ships in the box. To turn it on:
+There are two independent LLM features:
+
+| Feature | Module | What it does |
+| --- | --- | --- |
+| Narrative | `src/llm.py` | One model writes the lore/narrative section |
+| Ensemble | `src/llm_analyzers.py` | Three models score the token in parallel |
+
+Install the SDKs you have keys for and add the keys to `.env`:
 
 ```bash
-pip install anthropic            # or: pip install openai  (also used for Grok)
+pip install anthropic openai     # openai also drives Grok via api.x.ai/v1
 ```
 
 ```bash
-# .env
-MEMEDD_LLM_PROVIDER=anthropic    # anthropic | openai | xai
-MEMEDD_LLM_MODEL=claude-sonnet-4-5
+# .env — any subset works
+XAI_API_KEY=xai-...
 ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+
+# For the single-model narrative section:
+MEMEDD_LLM_PROVIDER=anthropic    # anthropic | openai | xai | none
 ```
 
-Then flick **Use LLM for lore analysis** in the sidebar. The sidebar always shows
-which engine is actually active, and any provider failure degrades silently back
-to the heuristic narrative — a flaky LLM can never take the dashboard down.
+Then use the sidebar: **Use LLM for lore analysis** for the narrative, and
+**Run ensemble on analysis** for the multi-model verdict. The sidebar lists each
+provider's live status (ready, no key, or SDK not installed), and both features
+degrade safely — a failing provider produces a recorded error, never a crash,
+and the deterministic analysis is unaffected.
 
-To add your own provider, implement the `NarrativeProvider` protocol and register
-it in `PROVIDERS`:
+### Adding your own provider
+
+For the **ensemble**, subclass an analyzer and register it. Everything else —
+parallel execution, repair, consensus, blending — comes for free:
 
 ```python
-class MyProvider:
-    name = "mine"
+class MyAnalyzer(OpenAICompatibleAnalyzer):   # any OpenAI-wire endpoint
+    provider = "mine"
+    label = "MyModel"
+    base_url = "https://api.example.com/v1"
 
-    def available(self) -> bool:
-        return bool(my_api_key)
-
-    def analyze(self, snapshot, security) -> NarrativeReport:
-        raw = call_my_model(build_narrative_prompt(snapshot, security))
-        return parse_llm_json(raw, model="my-model", source="mine")
-
-PROVIDERS["mine"] = MyProvider
+ANALYZERS["mine"] = MyAnalyzer
 ```
 
-Nothing downstream changes — the scorer, UI and exporters only ever see a
-`NarrativeReport`.
+For the **narrative**, subclass `_TransportProvider` in `src/llm.py` (it reuses
+the same vendor transports) and register it in `PROVIDERS`. Nothing downstream
+changes — the scorer, UI and exporters only ever see a `NarrativeReport` or an
+`EnsembleResult`.
 
 ---
 
@@ -198,19 +317,21 @@ src/
   data_fetchers.py      DexScreener + GoPlus clients and normalizers
   scorers.py            Six scoring pillars, composite, veto logic, risk calculator
   analyzer.py           Orchestration: analyze_token / analyze_many / scan
-  llm.py                Narrative layer + LLM provider seam (Claude/GPT/Grok)
+  llm.py                Narrative layer (single model, prose output)
+  llm_analyzers.py      Multi-LLM ensemble: strict JSON, parallel, consensus
   history.py            Local SQLite history
   report.py             Markdown / JSON export
   ui.py                 Reusable Streamlit components + CSS
   utils.py              Formatting, address parsing, safe coercion, TTL cache
-tests/                  94 unit + end-to-end tests (network fully stubbed)
+tests/                  173 unit + end-to-end tests (network and LLMs stubbed)
 .streamlit/config.toml  Dark theme
 ```
 
 The data flow is one direction, with normalization at the boundary:
 
 ```
-raw API JSON -> TokenSnapshot / SecurityReport -> ScoreCard -> RiskPlan -> UI / export
+raw API JSON -> TokenSnapshot / SecurityReport / TokenProfile
+             -> ScoreCard -> RiskPlan -> [LLM ensemble] -> UI / export
 ```
 
 No provider JSON ever reaches the scoring or UI layers, so swapping a data source
@@ -246,8 +367,14 @@ something to sweep. Base, Ethereum, Solana, BNB Chain and Arbitrum ship enabled.
   is searching for or promoting may not surface.
 - **Security coverage varies.** GoPlus has no record for very new tokens; those
   reports come back `unavailable` and are scored conservatively rather than skipped.
-- **Narrative is heuristic until you add a key.** The v1 narrative reads metadata,
-  not community sentiment. It says so in every report.
+- **Narrative is heuristic until you add a key.** Without an LLM key the
+  narrative reads metadata, not community sentiment. It says so in every report.
+- **The ensemble judges the payload, not the chain.** The models see only what
+  the fetchers collected. They cannot check a contract themselves, and three
+  models agreeing on incomplete data is still incomplete data — which is why
+  missing inputs lower confidence rather than being scored as clean.
+- **Cross-model deduplication is textual.** Two models phrasing the same risk
+  differently count as two points, not one; only near-identical wording merges.
 - **Price impact is an approximation.** Slippage uses a constant-product estimate
   (`x / (L/2 + x)`), which is the right order of magnitude but not a quote — v3
   concentrated liquidity in particular can behave very differently.
@@ -256,7 +383,8 @@ something to sweep. Base, Ethereum, Solana, BNB Chain and Arbitrum ship enabled.
 
 ## Roadmap
 
-- Grok-powered live X/Twitter mindshare scoring
+- Let Grok use its live X access explicitly for a mindshare sub-score
+- Per-model cost/latency tracking and a cheap-model tier for scanning
 - Wallet/bundle clustering to catch sybil "holder counts"
 - Historical score tracking and alerting on score changes
 - Backtesting the scoring model against realised returns

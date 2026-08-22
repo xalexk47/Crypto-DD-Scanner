@@ -7,8 +7,13 @@ needs no API key, so the app is fully functional out of the box.
 To add real LLM analysis (Claude / GPT / Grok), implement
 :class:`NarrativeProvider` and register it in :data:`PROVIDERS`.  The rest of
 the app only ever sees a :class:`~src.models.NarrativeReport`, so nothing
-downstream changes.  Scaffolding for each vendor is stubbed below with the
-exact call each SDK needs -- uncomment, add the key to ``.env``, done.
+downstream changes.
+
+This module owns *narrative* only: one model, prose-shaped output.  The vendor
+SDK calls themselves live in :mod:`src.llm_analyzers`, which the providers here
+reuse via ``request_json`` -- so each vendor's client setup, strict-JSON mode
+and fallback chain exist in exactly one place.  For a scored, multi-model
+verdict, use :func:`src.llm_analyzers.run_ensemble` instead.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import logging
 from typing import Dict, List, Optional, Protocol
 
 from . import config
+from .llm_analyzers import AnthropicAnalyzer, OpenAIAnalyzer, XAIAnalyzer
 from .models import NarrativeReport, SecurityReport, TokenSnapshot
 
 logger = logging.getLogger(__name__)
@@ -41,6 +47,25 @@ Return STRICT JSON with these keys:
 Never invent facts that are not in the data. If information is missing, say so.
 Do not give financial advice. Output JSON only, no markdown fences.
 """
+
+
+# Schema handed to the transport so providers that support structured output
+# return parseable JSON rather than prose we have to salvage.
+NARRATIVE_SCHEMA: Dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string", "description": "2-4 sentences on what this token is and why anyone cares."},
+        "themes": {"type": "array", "items": {"type": "string"}, "description": "1-5 short narrative tags."},
+        "bull_case": {"type": "array", "items": {"type": "string"}, "description": "2-4 concrete reasons it could run."},
+        "bear_case": {"type": "array", "items": {"type": "string"}, "description": "2-4 concrete reasons it fails."},
+        "mindshare_notes": {
+            "type": "array", "items": {"type": "string"},
+            "description": "1-3 observations about attention and community.",
+        },
+    },
+    "required": ["summary", "themes", "bull_case", "bear_case", "mindshare_notes"],
+    "additionalProperties": False,
+}
 
 
 def build_narrative_prompt(snapshot: TokenSnapshot, security: Optional[SecurityReport] = None) -> str:
@@ -253,7 +278,43 @@ class HeuristicProvider:
 # --------------------------------------------------------------------------
 # LLM providers -- scaffolded, key-gated
 # --------------------------------------------------------------------------
-class AnthropicProvider:
+class _TransportProvider:
+    """Narrative provider backed by an :mod:`src.llm_analyzers` transport.
+
+    Subclasses only pick the analyzer class; client construction, strict-JSON
+    negotiation and per-vendor fallbacks all come from the shared transport.
+    """
+
+    name = "transport"
+    analyzer_cls: type = AnthropicAnalyzer
+
+    def __init__(self, api_key: str = "", model: str = "", client: object = None) -> None:
+        self._analyzer = self.analyzer_cls(
+            api_key=api_key,
+            model=model or config.LLM_MODEL,
+            client=client,
+        )
+
+    @property
+    def model(self) -> str:
+        return self._analyzer.model
+
+    def available(self) -> bool:
+        return self._analyzer.available()
+
+    def unavailable_reason(self) -> str:
+        return self._analyzer.status().reason
+
+    def analyze(self, snapshot: TokenSnapshot, security: Optional[SecurityReport] = None) -> NarrativeReport:
+        raw = self._analyzer.request_json(
+            NARRATIVE_SYSTEM_PROMPT,
+            build_narrative_prompt(snapshot, security),
+            NARRATIVE_SCHEMA,
+        )
+        return parse_llm_json(raw, self.model, self.name)
+
+
+class AnthropicProvider(_TransportProvider):
     """Claude-backed narrative analysis.
 
     Enable with::
@@ -262,40 +323,14 @@ class AnthropicProvider:
         # .env
         ANTHROPIC_API_KEY=sk-ant-...
         MEMEDD_LLM_PROVIDER=anthropic
-        MEMEDD_LLM_MODEL=claude-sonnet-4-5      # or any current model id
+        MEMEDD_ANTHROPIC_MODEL=claude-opus-5      # optional override
     """
 
     name = "anthropic"
-    default_model = "claude-sonnet-4-5"
-
-    def __init__(self, api_key: str = "", model: str = "") -> None:
-        self.api_key = api_key or config.ANTHROPIC_API_KEY
-        self.model = model or config.LLM_MODEL or self.default_model
-
-    def available(self) -> bool:
-        if not self.api_key:
-            return False
-        try:
-            import anthropic  # noqa: F401
-        except ImportError:
-            return False
-        return True
-
-    def analyze(self, snapshot: TokenSnapshot, security: Optional[SecurityReport] = None) -> NarrativeReport:
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=self.api_key)
-        message = client.messages.create(
-            model=self.model,
-            max_tokens=1200,
-            system=NARRATIVE_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": build_narrative_prompt(snapshot, security)}],
-        )
-        text = "".join(block.text for block in message.content if getattr(block, "type", "") == "text")
-        return parse_llm_json(text, self.model, "anthropic")
+    analyzer_cls = AnthropicAnalyzer
 
 
-class OpenAIProvider:
+class OpenAIProvider(_TransportProvider):
     """GPT-backed narrative analysis.
 
     Enable with ``pip install openai``, ``OPENAI_API_KEY=...`` and
@@ -303,81 +338,18 @@ class OpenAIProvider:
     """
 
     name = "openai"
-    default_model = "gpt-4o-mini"
-
-    def __init__(self, api_key: str = "", model: str = "") -> None:
-        self.api_key = api_key or config.OPENAI_API_KEY
-        self.model = model or config.LLM_MODEL or self.default_model
-
-    def available(self) -> bool:
-        if not self.api_key:
-            return False
-        try:
-            import openai  # noqa: F401
-        except ImportError:
-            return False
-        return True
-
-    def analyze(self, snapshot: TokenSnapshot, security: Optional[SecurityReport] = None) -> NarrativeReport:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=self.api_key)
-        response = client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT},
-                {"role": "user", "content": build_narrative_prompt(snapshot, security)},
-            ],
-            response_format={"type": "json_object"},
-        )
-        return parse_llm_json(response.choices[0].message.content or "", self.model, "openai")
+    analyzer_cls = OpenAIAnalyzer
 
 
-class XAIProvider:
-    """Grok-backed narrative analysis.
+class XAIProvider(_TransportProvider):
+    """Grok-backed narrative analysis via xAI's OpenAI-compatible endpoint.
 
-    xAI exposes an OpenAI-compatible endpoint, so this reuses the OpenAI SDK
-    with a different ``base_url``.  Grok is the most interesting option here
-    because of its live X/Twitter access - exactly the mindshare signal the
-    heuristic layer cannot see.
+    The most interesting single-model option for meme coins: Grok has live
+    access to X, which is where meme-coin mindshare actually forms.
     """
 
     name = "xai"
-    default_model = "grok-4"
-    base_url = "https://api.x.ai/v1"
-
-    def __init__(self, api_key: str = "", model: str = "") -> None:
-        self.api_key = api_key or config.XAI_API_KEY
-        self.model = model or config.LLM_MODEL or self.default_model
-
-    def available(self) -> bool:
-        if not self.api_key:
-            return False
-        try:
-            import openai  # noqa: F401
-        except ImportError:
-            return False
-        return True
-
-    def analyze(self, snapshot: TokenSnapshot, security: Optional[SecurityReport] = None) -> NarrativeReport:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-        response = client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        build_narrative_prompt(snapshot, security)
-                        + "\n\nIf you have live access to X/Twitter, factor in current chatter "
-                          "about this ticker and note it in mindshare_notes."
-                    ),
-                },
-            ],
-        )
-        return parse_llm_json(response.choices[0].message.content or "", self.model, "xai")
+    analyzer_cls = XAIAnalyzer
 
 
 PROVIDERS: Dict[str, type] = {

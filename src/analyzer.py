@@ -12,7 +12,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Sequence, Tuple
 
-from . import config, data_fetchers, llm, scorers
+from . import config, data_fetchers, llm, llm_analyzers, scorers
 from .models import AnalysisResult, ScanCandidate, TokenSnapshot
 from .utils import normalize_address, utcnow_iso
 
@@ -48,6 +48,18 @@ def analyze_token(
     result.chain = snapshot.chain or settings.chain
     result.data_warnings = list(warnings)
 
+    # --- 1b. DexScreener token profile ------------------------------------
+    # Fills in the project description and any socials the pair data lacks,
+    # which materially improves both the narrative and the LLM payload.
+    try:
+        profile = data_fetchers.fetch_token_profile(address, result.chain, use_cache=use_cache)
+    except Exception as exc:  # noqa: BLE001 - enrichment is strictly optional
+        logger.info("Token profile lookup failed for %s: %s", address, exc)
+        profile = None
+    if profile is not None:
+        result.profile = profile
+        data_fetchers.enrich_snapshot_with_profile(snapshot, profile)
+
     # --- 2. security -----------------------------------------------------
     security = data_fetchers.fetch_security_report(address, result.chain, use_cache=use_cache)
     result.security = security
@@ -74,6 +86,23 @@ def analyze_token(
         risk_profile_key=settings.risk_profile,
         security=security,
     )
+
+    # --- 6. multi-LLM ensemble (optional) ---------------------------------
+    # Runs last so the models can see the deterministic verdict and argue with
+    # it. The rules-engine score above is never overwritten -- the blended
+    # score lives alongside it in result.ensemble.
+    if settings.use_ensemble:
+        result.ensemble = llm_analyzers.run_ensemble(
+            snapshot,
+            security,
+            scorecard,
+            profile=result.profile,
+            providers=settings.ensemble_providers,
+            blend_weight=settings.blend_weight,
+        )
+        for note in result.ensemble.notes:
+            logger.info("ensemble: %s", note)
+
     return result
 
 

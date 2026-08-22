@@ -11,7 +11,7 @@ from typing import Iterable, List, Optional
 import streamlit as st
 
 from . import config
-from .models import AnalysisResult, ScoreCard, SecurityReport, TokenSnapshot
+from .models import AnalysisResult, EnsembleResult, ScoreCard, SecurityReport, TokenProfile, TokenSnapshot
 from .utils import fmt_number, fmt_pct, fmt_usd, score_color, score_emoji, short_address
 
 # --------------------------------------------------------------------------
@@ -88,6 +88,15 @@ CUSTOM_CSS = """
 
 .mdd-note { color: var(--mdd-muted); font-size: .82rem; }
 .mdd-disclaimer { color: var(--mdd-muted); font-size: .76rem; line-height: 1.5; border-top: 1px solid var(--mdd-border); padding-top: .8rem; margin-top: 1.4rem; }
+
+.mdd-model-head { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; margin-bottom: .1rem; }
+.mdd-model-name { font-weight: 700; font-size: .95rem; }
+.mdd-model-meta { color: var(--mdd-muted); font-size: .72rem; font-family: ui-monospace, SFMono-Regular, monospace; }
+.mdd-model-score { font-size: 1.9rem; font-weight: 800; line-height: 1.1; letter-spacing: -0.02em; }
+.mdd-quote { border-left: 3px solid var(--mdd-border); padding: .1rem 0 .1rem .8rem; color: var(--mdd-text); font-size: .9rem; margin: .4rem 0; }
+.mdd-agree-track { height: 7px; background: #0d141c; border: 1px solid var(--mdd-border); border-radius: 999px; overflow: hidden; margin-top: .3rem; }
+.mdd-agree-fill { height: 100%; border-radius: 999px; }
+.mdd-fail { color: #f97316; font-size: .82rem; }
 
 /* Phones: stop Streamlit metric labels wrapping into unreadable slivers. */
 @media (max-width: 640px) {
@@ -438,6 +447,205 @@ def render_pros_cons(card: ScoreCard) -> None:
         with st.expander(f"🚩 Key risks ({len(card.risks)})", expanded=bool(card.risks)):
             for item in card.risks or ["No specific risks flagged - which is itself unusual."]:
                 st.markdown(f"- {item}")
+
+
+def render_profile(profile: Optional[TokenProfile]) -> None:
+    """Show the DexScreener token profile (project-supplied description/links)."""
+    if profile is None or not profile.has_content:
+        return
+    links = " · ".join(f"[{link.label or link.kind.title()}]({link.url})" for link in profile.links[:6])
+    st.markdown("#### 🪪 Project profile <span class='mdd-badge'>dexscreener</span>", unsafe_allow_html=True)
+    if profile.description:
+        st.markdown(f'<div class="mdd-card"><div class="mdd-quote">{profile.description}</div></div>',
+                    unsafe_allow_html=True)
+    else:
+        st.caption("Profile claimed, but no description published.")
+    if links:
+        st.caption(links)
+
+
+def _agreement_bar(agreement: float) -> str:
+    color = score_color(agreement * 100)
+    return (
+        f'<div class="mdd-agree-track"><div class="mdd-agree-fill" '
+        f'style="width:{max(0.0, min(1.0, agreement)) * 100:.0f}%;background:{color};"></div></div>'
+    )
+
+
+def render_ensemble(ensemble: Optional[EnsembleResult], deterministic: Optional[ScoreCard] = None) -> None:
+    """Render the multi-model panel: consensus, per-model cards, dissent."""
+    if ensemble is None:
+        return
+
+    st.markdown("#### 🤖 Multi-LLM ensemble")
+
+    if not ensemble.ok:
+        st.info(
+            "No model verdicts. "
+            + (" ".join(ensemble.notes) if ensemble.notes else "Add an API key to .env to enable the ensemble."),
+            icon="🤖",
+        )
+        return
+
+    consensus = ensemble.consensus
+    if consensus is not None:
+        left, right = st.columns([1, 2], gap="large")
+        with left:
+            color = score_color(consensus.overall_score)
+            blended_block = ""
+            if ensemble.blended_score is not None:
+                blend_color = score_color(ensemble.blended_score)
+                blended_block = f"""
+                  <div style="border-top:1px solid var(--mdd-border);margin-top:.9rem;padding-top:.7rem;">
+                    <div class="mdd-note">BLENDED WITH RULES ENGINE</div>
+                    <div style="font-size:1.6rem;font-weight:800;color:{blend_color};line-height:1.2;">
+                      {ensemble.blended_score:.0f}<span class="mdd-score-den">/100</span>
+                    </div>
+                    <div class="mdd-note">
+                      {config.DECISION_LABELS.get(ensemble.blended_decision, ensemble.blended_decision)}
+                      · {ensemble.blend_weight * 100:.0f}% LLM weight
+                    </div>
+                  </div>
+                """
+            st.markdown(
+                f"""
+                <div class="mdd-card" style="text-align:center;">
+                  <div class="mdd-note">CONSENSUS OF {consensus.model_count} MODEL(S)</div>
+                  <div class="mdd-score-num" style="color:{color};">{consensus.overall_score:.0f}<span class="mdd-score-den">/100</span></div>
+                  <div style="margin-top:.7rem;">{decision_badge(consensus.decision_label, consensus.overall_score)}</div>
+                  <div class="mdd-note" style="margin-top:.7rem;">
+                    Confidence {consensus.confidence * 100:.0f}% · agreement {consensus.agreement * 100:.0f}%
+                  </div>
+                  {_agreement_bar(consensus.agreement)}
+                  {blended_block}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with right:
+            bars = "".join(
+                score_bar_html(
+                    config.COMPONENT_LABELS.get(dim, dim.title()),
+                    consensus.dimension_scores.get(dim, 0.0) * 10,   # 0-10 -> 0-100
+                    caption=f"{consensus.dimension_scores.get(dim, 0.0):.1f}/10",
+                )
+                for dim in config.LLM_DIMENSIONS
+            )
+            st.markdown(
+                f'<div class="mdd-card"><h3>Consensus dimensions</h3>{bars}</div>',
+                unsafe_allow_html=True,
+            )
+
+        if consensus.corroborated_rug_flags:
+            st.error(
+                "**Rug flags raised by more than one model:** "
+                + "; ".join(consensus.corroborated_rug_flags),
+                icon="🚨",
+            )
+        elif consensus.rug_flags:
+            st.warning(
+                "**Rug flags (single model each — verify):** " + "; ".join(consensus.rug_flags),
+                icon="⚠️",
+            )
+
+        for note in consensus.dissent:
+            st.warning(note, icon="⚖️")
+
+        if deterministic is not None:
+            gap = consensus.overall_score - deterministic.composite
+            if abs(gap) >= 20:
+                direction = "more bullish than" if gap > 0 else "more bearish than"
+                st.info(
+                    f"The models are {abs(gap):.0f} points {direction} the rules engine "
+                    f"({consensus.overall_score:.0f} vs {deterministic.composite:.0f}). "
+                    "Worth reading both rationales before acting.",
+                    icon="🔍",
+                )
+
+    # -- per-model cards ------------------------------------------------
+    st.markdown("##### Individual model verdicts")
+    verdicts = ensemble.verdicts
+    columns = st.columns(min(3, max(1, len(verdicts))), gap="medium")
+    for index, verdict in enumerate(verdicts):
+        with columns[index % len(columns)]:
+            if not verdict.ok:
+                st.markdown(
+                    f"""
+                    <div class="mdd-card">
+                      <div class="mdd-model-head"><span class="mdd-model-name">{verdict.provider}</span></div>
+                      <div class="mdd-model-meta">{verdict.model}</div>
+                      <div class="mdd-fail" style="margin-top:.6rem;">Failed: {verdict.error}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                continue
+            color = score_color(verdict.overall_score)
+            st.markdown(
+                f"""
+                <div class="mdd-card">
+                  <div class="mdd-model-head">
+                    <span class="mdd-model-name">{verdict.provider}</span>
+                    <span class="mdd-model-meta">{verdict.latency_ms / 1000:.1f}s</span>
+                  </div>
+                  <div class="mdd-model-meta">{verdict.model}</div>
+                  <div class="mdd-model-score" style="color:{color};margin-top:.5rem;">{verdict.overall_score:.0f}</div>
+                  <div style="margin-top:.4rem;">
+                    <span class="mdd-badge">{verdict.decision_label}</span>
+                    <span class="mdd-badge">conf {verdict.confidence * 100:.0f}%</span>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            with st.expander(f"{verdict.provider} detail"):
+                if verdict.lore_summary:
+                    st.markdown(f'<div class="mdd-quote">{verdict.lore_summary}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    " ".join(
+                        f'<span class="mdd-badge">{config.COMPONENT_LABELS.get(dim, dim)} '
+                        f'{verdict.dimension_scores.get(dim, 0):.0f}/10</span>'
+                        for dim in config.LLM_DIMENSIONS
+                    ),
+                    unsafe_allow_html=True,
+                )
+                if verdict.rationale:
+                    st.markdown(f"**Rationale.** {verdict.rationale}")
+                if verdict.key_positives:
+                    st.markdown("**Positives**")
+                    for item in verdict.key_positives:
+                        st.markdown(f"- {item}")
+                if verdict.key_risks:
+                    st.markdown("**Risks**")
+                    for item in verdict.key_risks:
+                        st.markdown(f"- {item}")
+                if verdict.rug_flags:
+                    st.markdown("**Rug flags**")
+                    for item in verdict.rug_flags:
+                        st.markdown(f"- 🚩 {item}")
+                if verdict.warnings:
+                    st.caption("Response repairs: " + "; ".join(verdict.warnings))
+
+    if consensus is not None:
+        with st.expander("Merged positives, risks and consensus rationale"):
+            st.markdown(f"**Consensus rationale.** {consensus.rationale}")
+            left, right = st.columns(2, gap="medium")
+            with left:
+                st.markdown("**Positives (most corroborated first)**")
+                for item in consensus.key_positives or ["None offered."]:
+                    st.markdown(f"- {item}")
+            with right:
+                st.markdown("**Risks (most corroborated first)**")
+                for item in consensus.key_risks or ["None offered."]:
+                    st.markdown(f"- {item}")
+
+    footer = [f"Ran in {ensemble.elapsed_ms / 1000:.1f}s"]
+    if ensemble.skipped:
+        footer.append(
+            "skipped: " + ", ".join(f"{name} ({reason})" for name, reason in ensemble.skipped.items())
+        )
+    st.caption(" · ".join(footer))
 
 
 def disclaimer() -> None:

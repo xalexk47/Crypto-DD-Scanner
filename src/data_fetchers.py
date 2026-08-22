@@ -25,7 +25,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import httpx
 
 from . import config
-from .models import HolderEntry, SecurityReport, SocialLink, TokenSnapshot
+from .models import HolderEntry, SecurityReport, SocialLink, TokenProfile, TokenSnapshot
 from .utils import (
     TTLCache,
     chunked,
@@ -302,6 +302,95 @@ def fetch_token_profiles(use_cache: bool = True) -> List[Dict[str, Any]]:
     items = payload if isinstance(payload, list) else (payload or {}).get("profiles") or []
     _scan_cache.set(key, items)
     return items
+
+
+def _profile_links(item: Dict[str, Any]) -> List[SocialLink]:
+    """Normalize a profile's flat ``links`` array.
+
+    Profile links carry either a ``type`` ("twitter") or a ``label``
+    ("Website"), unlike pair ``info`` which splits websites and socials into
+    separate arrays.
+    """
+    links: List[SocialLink] = []
+    for entry in dig(item, "links", default=[]) or []:
+        url = dig(entry, "url", default="")
+        if not url:
+            continue
+        kind = (dig(entry, "type", default="") or "").lower()
+        label = dig(entry, "label", default="") or ""
+        if not kind:
+            # No type means a plain website link; the label names it.
+            kind = "website" if not label or "site" in label.lower() else label.lower()
+        links.append(SocialLink(kind=kind, url=url, label=label or kind.title()))
+    return links
+
+
+def normalize_token_profile(item: Dict[str, Any]) -> Optional[TokenProfile]:
+    """Convert one raw entry from the token-profiles feed into a TokenProfile."""
+    address = dig(item, "tokenAddress", default="") or ""
+    if not address:
+        return None
+    return TokenProfile(
+        address=address,
+        chain=(dig(item, "chainId", default="") or "").lower(),
+        url=dig(item, "url", default="") or "",
+        icon_url=dig(item, "icon", default="") or "",
+        header_url=dig(item, "header", default="") or "",
+        description=(dig(item, "description", default="") or "").strip(),
+        links=_profile_links(item),
+    )
+
+
+def fetch_latest_profiles(chain: Optional[str] = None, use_cache: bool = True) -> List[TokenProfile]:
+    """Latest DexScreener token profiles, newest first, optionally per chain.
+
+    This is the "projects that just claimed their DexScreener page" feed -- the
+    closest thing the free API has to a new-launch wire, and the only endpoint
+    that reliably carries a project description.
+    """
+    chain_id = config.get_chain(chain).dexscreener_id if chain else None
+    profiles: List[TokenProfile] = []
+    for item in fetch_token_profiles(use_cache=use_cache):
+        profile = normalize_token_profile(item)
+        if profile is None:
+            continue
+        if chain_id and profile.chain != chain_id:
+            continue
+        profiles.append(profile)
+    return profiles
+
+
+def fetch_token_profile(address: str, chain: Optional[str] = None, use_cache: bool = True) -> Optional[TokenProfile]:
+    """Look one token up in the latest-profiles feed.
+
+    The feed is a single cached call that serves every lookup, so this is
+    effectively free after the first hit. Returns ``None`` when the token has
+    no profile -- which is the common case, and not an error.
+    """
+    target = normalize_address(address)
+    for profile in fetch_latest_profiles(chain, use_cache=use_cache):
+        if normalize_address(profile.address) == target:
+            return profile
+    return None
+
+
+def enrich_snapshot_with_profile(snapshot: TokenSnapshot, profile: Optional[TokenProfile]) -> TokenSnapshot:
+    """Fold profile metadata into a snapshot without overwriting pair data.
+
+    Pair ``info`` wins where both exist; the profile fills the gaps, which in
+    practice means the description and any socials the pair did not list.
+    """
+    if profile is None or not profile.has_content:
+        return snapshot
+    if not snapshot.description and profile.description:
+        snapshot.description = profile.description
+    if not snapshot.image_url and profile.icon_url:
+        snapshot.image_url = profile.icon_url
+    known = {(link.kind.lower(), link.url) for link in snapshot.socials}
+    for link in profile.links:
+        if (link.kind.lower(), link.url) not in known:
+            snapshot.socials.append(link)
+    return snapshot
 
 
 def fetch_pairs_for_addresses(chain: str, addresses: Sequence[str], use_cache: bool = True) -> List[Dict[str, Any]]:

@@ -29,6 +29,34 @@ class SocialLink:
 
 
 @dataclass
+class TokenProfile:
+    """A DexScreener token profile (``/token-profiles/latest/v1``).
+
+    Profiles are project-supplied metadata -- description, icon, header art and
+    social links -- for tokens whose teams have claimed their DexScreener page.
+    Richer than the ``info`` block on a pair, and the only place a description
+    usually appears, so it feeds both the narrative layer and the LLM prompt.
+    """
+
+    address: str
+    chain: str
+    url: str = ""
+    icon_url: str = ""
+    header_url: str = ""
+    description: str = ""
+    links: List[SocialLink] = field(default_factory=list)
+
+    @property
+    def has_content(self) -> bool:
+        return bool(self.description or self.links or self.icon_url)
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["links"] = [link.to_dict() for link in self.links]
+        return data
+
+
+@dataclass
 class TokenSnapshot:
     """Normalized market view of a token, built from its best DexScreener pair."""
 
@@ -330,6 +358,137 @@ class NarrativeReport:
 
 
 # --------------------------------------------------------------------------
+# Multi-LLM ensemble
+# --------------------------------------------------------------------------
+@dataclass
+class LLMVerdict:
+    """One model's answer, normalized to the shared verdict schema.
+
+    Mirrors the JSON contract in :mod:`src.llm_analyzers` exactly, plus call
+    metadata. Out-of-range or missing values are repaired on parse rather than
+    rejected -- one sloppy model should not sink the whole ensemble -- and
+    ``repaired``/``warnings`` record what had to be fixed.
+    """
+
+    provider: str                       # "xai" | "anthropic" | "openai"
+    model: str
+    ok: bool = True
+    error: str = ""
+    latency_ms: int = 0
+
+    overall_score: float = 0.0          # 0-100
+    decision: str = "pass"              # strong_buy | buy | watch | pass
+    confidence: float = 0.0             # 0.0-1.0
+    dimension_scores: Dict[str, float] = field(default_factory=dict)   # each 0-10
+    lore_summary: str = ""
+    key_positives: List[str] = field(default_factory=list)
+    key_risks: List[str] = field(default_factory=list)
+    rug_flags: List[str] = field(default_factory=list)
+    rationale: str = ""
+
+    repaired: bool = False              # we had to coerce the model's JSON
+    warnings: List[str] = field(default_factory=list)
+    raw_excerpt: str = ""               # first ~600 chars, for debugging
+
+    @property
+    def decision_label(self) -> str:
+        from .config import DECISION_LABELS
+
+        return DECISION_LABELS.get(self.decision, self.decision.replace("_", " ").title())
+
+    @property
+    def label(self) -> str:
+        return f"{self.provider}/{self.model}"
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["decision_label"] = self.decision_label
+        return data
+
+
+@dataclass
+class ConsensusVerdict:
+    """The ensemble's combined answer, plus how much the models agreed."""
+
+    overall_score: float = 0.0
+    decision: str = "pass"
+    confidence: float = 0.0
+    dimension_scores: Dict[str, float] = field(default_factory=dict)
+    lore_summary: str = ""
+    key_positives: List[str] = field(default_factory=list)
+    key_risks: List[str] = field(default_factory=list)
+    rug_flags: List[str] = field(default_factory=list)
+    rationale: str = ""
+
+    model_count: int = 0
+    agreement: float = 1.0              # 0-1, how tightly the models agreed
+    score_spread: float = 0.0           # max - min overall_score
+    decision_split: Dict[str, int] = field(default_factory=dict)
+    # Rug flags raised independently by 2+ models carry far more weight than
+    # one model's hunch, so they are tracked separately.
+    corroborated_rug_flags: List[str] = field(default_factory=list)
+    dissent: List[str] = field(default_factory=list)
+
+    @property
+    def decision_label(self) -> str:
+        from .config import DECISION_LABELS
+
+        return DECISION_LABELS.get(self.decision, self.decision.replace("_", " ").title())
+
+    @property
+    def unanimous(self) -> bool:
+        return len(self.decision_split) <= 1
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["decision_label"] = self.decision_label
+        data["unanimous"] = self.unanimous
+        return data
+
+
+@dataclass
+class EnsembleResult:
+    """Everything returned by one parallel multi-model run."""
+
+    verdicts: List[LLMVerdict] = field(default_factory=list)
+    consensus: Optional[ConsensusVerdict] = None
+    requested: List[str] = field(default_factory=list)
+    skipped: Dict[str, str] = field(default_factory=dict)   # provider -> why
+    elapsed_ms: int = 0
+    # Deterministic score blended with the consensus (see blend_with_deterministic).
+    blended_score: Optional[float] = None
+    blended_decision: str = ""
+    blend_weight: float = 0.0
+    notes: List[str] = field(default_factory=list)
+
+    @property
+    def successful(self) -> List[LLMVerdict]:
+        return [v for v in self.verdicts if v.ok]
+
+    @property
+    def failed(self) -> List[LLMVerdict]:
+        return [v for v in self.verdicts if not v.ok]
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.successful)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "verdicts": [v.to_dict() for v in self.verdicts],
+            "consensus": self.consensus.to_dict() if self.consensus else None,
+            "requested": self.requested,
+            "skipped": self.skipped,
+            "elapsed_ms": self.elapsed_ms,
+            "blended_score": self.blended_score,
+            "blended_decision": self.blended_decision,
+            "blend_weight": self.blend_weight,
+            "notes": self.notes,
+            "model_count": len(self.successful),
+        }
+
+
+# --------------------------------------------------------------------------
 # Top-level result
 # --------------------------------------------------------------------------
 @dataclass
@@ -345,6 +504,8 @@ class AnalysisResult:
     scorecard: Optional[ScoreCard] = None
     risk_plan: Optional[RiskPlan] = None
     narrative: Optional[NarrativeReport] = None
+    ensemble: Optional[EnsembleResult] = None
+    profile: Optional[TokenProfile] = None
     data_warnings: List[str] = field(default_factory=list)
     analyzed_at: str = ""
 
@@ -375,6 +536,8 @@ class AnalysisResult:
             "scorecard": self.scorecard.to_dict() if self.scorecard else None,
             "risk_plan": self.risk_plan.to_dict() if self.risk_plan else None,
             "narrative": self.narrative.to_dict() if self.narrative else None,
+            "ensemble": self.ensemble.to_dict() if self.ensemble else None,
+            "profile": self.profile.to_dict() if self.profile else None,
         }
 
 

@@ -139,7 +139,53 @@ GOPLUS_APP_SECRET = os.getenv("GOPLUS_APP_SECRET", "")
 
 # "none" keeps the app fully offline-capable; see src/llm.py.
 LLM_PROVIDER = os.getenv("MEMEDD_LLM_PROVIDER", "none").lower()
+# Legacy single-provider override: applies to the narrative path in src/llm.py
+# only. The ensemble uses the per-provider model ids below.
 LLM_MODEL = os.getenv("MEMEDD_LLM_MODEL", "")
+
+
+# --------------------------------------------------------------------------
+# Multi-LLM ensemble (src/llm_analyzers.py)
+# --------------------------------------------------------------------------
+# Each provider gets its own model id so the ensemble can mix tiers -- e.g. a
+# frontier model for judgement plus a cheaper one for a second opinion.
+ANTHROPIC_MODEL = os.getenv("MEMEDD_ANTHROPIC_MODEL", "claude-opus-5")
+OPENAI_MODEL = os.getenv("MEMEDD_OPENAI_MODEL", "gpt-4.1")
+XAI_MODEL = os.getenv("MEMEDD_XAI_MODEL", "grok-4")
+
+# xAI speaks the OpenAI wire protocol, so the OpenAI SDK drives it with a
+# different base URL.
+XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "")  # blank = SDK default
+
+# Providers the ensemble will try, in display order. Any without a key or SDK
+# installed are skipped with a reason rather than failing the run.
+ENSEMBLE_PROVIDERS = tuple(
+    p.strip().lower()
+    for p in os.getenv("MEMEDD_ENSEMBLE_PROVIDERS", "xai,anthropic,openai").split(",")
+    if p.strip()
+)
+
+LLM_TIMEOUT_SECONDS = float(os.getenv("MEMEDD_LLM_TIMEOUT", "75"))
+LLM_MAX_TOKENS = int(os.getenv("MEMEDD_LLM_MAX_TOKENS", "16000"))
+# Low temperature: we want reproducible scoring, not creative writing.
+LLM_TEMPERATURE = float(os.getenv("MEMEDD_LLM_TEMPERATURE", "0.2"))
+
+# How much the LLM consensus moves the final blended score. 0.0 = ignore the
+# models entirely, 1.0 = trust them over the deterministic engine.
+ENSEMBLE_BLEND_WEIGHT = float(os.getenv("MEMEDD_ENSEMBLE_BLEND_WEIGHT", "0.35"))
+
+# Decision vocabulary shared with the models (snake_case in the JSON schema).
+LLM_DECISIONS = ("strong_buy", "buy", "watch", "pass")
+LLM_DIMENSIONS = ("security", "liquidity", "holders", "mindshare", "lore", "catalyst")
+
+# Maps the models' snake_case decisions onto the UI's display labels.
+DECISION_LABELS = {
+    "strong_buy": "Strong Buy",
+    "buy": "Buy",
+    "watch": "Watch",
+    "pass": "Pass",
+}
 
 
 # --------------------------------------------------------------------------
@@ -265,6 +311,10 @@ class AppSettings:
     risk_profile: str = DEFAULT_RISK_PROFILE
     weights: ScoreWeights = field(default_factory=lambda: DEFAULT_WEIGHTS)
     use_llm: bool = False
+    # Multi-model ensemble (Grok + Claude + GPT in parallel).
+    use_ensemble: bool = False
+    ensemble_providers: tuple = ENSEMBLE_PROVIDERS
+    blend_weight: float = ENSEMBLE_BLEND_WEIGHT
 
     def risk(self) -> RiskProfile:
         return RISK_PROFILES.get(self.risk_profile, RISK_PROFILES[DEFAULT_RISK_PROFILE])
