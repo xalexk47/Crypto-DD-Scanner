@@ -1,0 +1,17 @@
+# Dark theme for MemeDD Dashboard.
+# Streamlit reads this automatically when the app is launched from the
+# project root (`streamlit run app.py`).
+
+[theme]
+base = "dark"
+primaryColor = "#22d3ee"
+backgroundColor = "#0b0f14"
+secondaryBackgroundColor = "#131a22"
+textColor = "#e6edf3"
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
