@@ -9,7 +9,7 @@ import pytest
 from src import config, mindshare as ms, scorers
 from src.data_fetchers import snapshot_from_pair
 from src.models import MindshareReport, TokenSnapshot
-from tests.fake_llm import FakeOpenAIClient
+from tests.fake_llm import FakeOpenAIClient, FakeResponsesClient
 from tests.fixtures import TOKEN_ADDRESS, dexscreener_pair
 
 
@@ -203,61 +203,71 @@ class TestMomentumIntegration:
 
 
 class TestGrokClient:
-    def test_fetches_and_parses_via_the_live_search_tool(self, snapshot):
-        client = FakeOpenAIClient(content=payload_json())
+    def test_live_search_goes_through_the_responses_endpoint(self, snapshot):
+        """x_search lives on /v1/responses, not chat.completions.
+
+        Confirmed against the live API: chat.completions rejects x_search
+        outright, and its own live_search alternative returns 410 deprecated.
+        """
+        client = FakeResponsesClient(content=payload_json())
         report = ms.GrokMindshareClient(api_key="k", client=client).fetch(snapshot)
 
         assert report.available and report.is_live
-        sent = client.calls[0]
+        assert len(client.responses_calls) == 1
+        sent = client.responses_calls[0]
         assert sent["model"] == config.X_SEARCH_MODEL
-        assert sent["tools"][0]["type"] == config.X_SEARCH_TOOL_TYPE
+        assert sent["tools"][0]["type"] == "x_search"
+        assert "input" in sent            # Responses API uses input, not messages
 
-    def test_tool_type_is_live_search_not_x_search(self):
-        """/v1/chat/completions accepts `function` or `live_search`.
-
-        `x_search` belongs to xAI's separate Responses API and is rejected here
-        with a 422 -- confirmed against the live endpoint.
-        """
-        assert config.X_SEARCH_TOOL_TYPE == "live_search"
+    def test_tool_type_is_x_search(self):
+        assert config.X_SEARCH_TOOL_TYPE == "x_search"
         for variant in ms.GrokMindshareClient(api_key="k").search_tool_variants(48):
-            assert variant["type"] == "live_search"
+            assert variant["type"] == "x_search"
 
     def test_variants_run_richest_to_minimal(self):
         variants = ms.GrokMindshareClient(api_key="k").search_tool_variants(48)
 
         assert len(variants) >= 2
-        # The last shape must always parse: type only, no extra fields.
-        assert variants[-1] == {"type": "live_search"}
-        # Earlier shapes carry the search window and source restriction.
+        # The documented minimal form must be last, as the always-valid option.
+        assert variants[-1] == {"type": "x_search"}
         first = json.dumps(variants[0])
-        assert "from_date" in first and "to_date" in first and "sources" in first
+        assert "from_date" in first and "to_date" in first
+
+    def test_an_sdk_without_the_responses_endpoint_degrades(self, snapshot):
+        """An older openai SDK must fall back, not crash."""
+        client = FakeResponsesClient(content=payload_json(), no_responses_endpoint=True)
+        report = ms.GrokMindshareClient(api_key="k", client=client).fetch(snapshot)
+
+        assert report.available is True
+        assert report.is_live is False
+        assert report.source == "model_knowledge"
 
     def test_falls_back_to_non_live_and_labels_it(self, snapshot):
         """When every tool shape is rejected, the answer must not claim to be live."""
         variants = ms.GrokMindshareClient(api_key="k").search_tool_variants(48)
         tool_attempts = len(variants) * 2      # each shape, with and without the schema
 
-        client = FakeOpenAIClient(content=payload_json(), fail_modes=tool_attempts)
+        client = FakeResponsesClient(content=payload_json(), fail_modes=tool_attempts)
         report = ms.GrokMindshareClient(api_key="k", client=client).fetch(snapshot)
 
         assert report.available is True
         assert report.is_live is False               # must not claim live data
         assert report.source == "model_knowledge"
-        # Every tool-bearing attempt was tried before giving up on live data.
-        assert all("tools" in call for call in client.calls[:tool_attempts])
+        # Live attempts all went to /v1/responses; the fallback did not.
+        assert len(client.responses_calls) == tool_attempts
         assert "tools" not in client.calls[tool_attempts]
         assert any("not current activity" in w for w in report.warnings)
 
     def test_a_rejected_shape_moves_on_to_the_next(self, snapshot):
         """One bad shape must not sink the feature - the next shape is tried."""
-        client = FakeOpenAIClient(content=payload_json(), fail_modes=1)
+        client = FakeResponsesClient(content=payload_json(), fail_modes=1)
         report = ms.GrokMindshareClient(api_key="k", client=client).fetch(snapshot)
 
         assert report.is_live is True                # still live, via shape 2
-        assert len(client.calls) == 2
+        assert len(client.responses_calls) == 2
 
     def test_total_failure_returns_an_actionable_error(self, snapshot):
-        client = FakeOpenAIClient(error=RuntimeError("410 Gone"))
+        client = FakeResponsesClient(error=RuntimeError("410 Gone"))
         report = ms.GrokMindshareClient(api_key="k", client=client).fetch(snapshot)
 
         assert report.available is False
@@ -278,11 +288,9 @@ class TestGrokClient:
 
     def test_search_window_becomes_an_iso_date_range(self):
         richest = ms.GrokMindshareClient(api_key="k").search_tool_variants(48)[0]
-        params = richest["live_search"]
 
-        assert len(params["from_date"]) == 10 and params["from_date"].count("-") == 2
-        assert params["from_date"] <= params["to_date"]
-        assert params["sources"] == [{"type": "x"}]
+        assert len(richest["from_date"]) == 10 and richest["from_date"].count("-") == 2
+        assert richest["from_date"] <= richest["to_date"]
 
 
 class TestEnsembleHandoff:

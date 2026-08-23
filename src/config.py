@@ -215,10 +215,14 @@ ENSEMBLE_PROVIDERS = tuple(
 # your account actually supports, then set these accordingly.
 X_SEARCH_ENABLED = os.getenv("MEMEDD_X_SEARCH", "1").strip().lower() not in ("0", "false", "no")
 X_SEARCH_MODEL = os.getenv("MEMEDD_X_SEARCH_MODEL", "grok-4.6")
-# Confirmed against the live API: /v1/chat/completions accepts tools of type
-# "function" or "live_search". The "x_search" tool belongs to xAI's separate
-# Responses API (/v1/responses) and is rejected here with a 422.
-X_SEARCH_TOOL_TYPE = os.getenv("MEMEDD_X_SEARCH_TOOL", "live_search")
+# Confirmed against the live API, the hard way:
+#   * /v1/chat/completions accepts tools of type "function" or "live_search"
+#   * "live_search" parses but then returns 410: "Live search is deprecated.
+#     Please switch to the Agent Tools API"
+#   * the Agent Tools API lives on /v1/responses, where "x_search" is valid
+# So server-side X search runs through client.responses.create(), not
+# chat.completions. The non-live fallback still uses chat.completions.
+X_SEARCH_TOOL_TYPE = os.getenv("MEMEDD_X_SEARCH_TOOL", "x_search")
 # Restrict Live Search to X only; "web" is available but dilutes a mindshare
 # reading with news articles and blog spam.
 X_SEARCH_SOURCES = tuple(

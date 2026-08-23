@@ -346,49 +346,54 @@ class GrokMindshareClient:
 
     # -- the tool definition --------------------------------------------
     def search_tool_variants(self, window_hours: int) -> List[Dict[str, Any]]:
-        """Candidate Live Search tool payloads, richest first.
+        """Candidate x_search tool payloads for the Agent Tools API.
 
-        xAI's chat-completions endpoint validates the tools array strictly and
-        rejects unknown fields outright, but its rejection messages enumerate
-        what it *does* accept -- so trying a short list of documented shapes and
-        keeping the first that is accepted is more reliable than betting the
-        feature on one guess. A rejected shape fails during request
-        deserialization, before any model runs, so a miss costs no tokens.
-
-        Order matters: the first two carry the date window and restrict the
-        search to X, the last is the minimal form that always parses but falls
-        back to Live Search's own defaults (web + x, 20 results).
+        The documented minimal form is ``{"type": "x_search"}``; the richer form
+        adds the date window and a result cap. Richest first, minimal last, so a
+        schema change costs us a rejected request rather than the feature.
         """
         now = datetime.now(timezone.utc)
         from_date = (now - timedelta(hours=max(1, window_hours))).strftime("%Y-%m-%d")
         to_date = now.strftime("%Y-%m-%d")
         tool_type = config.X_SEARCH_TOOL_TYPE
-        sources_objects = [{"type": name} for name in config.X_SEARCH_SOURCES]
-        params = {
-            "sources": sources_objects,
-            "from_date": from_date,
-            "to_date": to_date,
-            "max_search_results": config.X_SEARCH_MAX_RESULTS,
-        }
         return [
-            # Nested under a key matching the tool type.
-            {"type": tool_type, tool_type: dict(params)},
-            # Flat alongside the type.
-            {"type": tool_type, **params},
-            # Bare source names rather than objects.
-            {"type": tool_type, **{**params, "sources": list(config.X_SEARCH_SOURCES)}},
-            # Minimal: always parses, uses Live Search defaults.
+            {
+                "type": tool_type,
+                "from_date": from_date,
+                "to_date": to_date,
+                "max_search_results": config.X_SEARCH_MAX_RESULTS,
+            },
+            {"type": tool_type, "from_date": from_date, "to_date": to_date},
             {"type": tool_type},
         ]
 
-    # Retained for callers that only need one payload (the diagnostic script).
-    def _x_search_tool(self, window_hours: int) -> Dict[str, Any]:
-        return self.search_tool_variants(window_hours)[0]
-
     def _completion(self, messages: List[Dict[str, str]], **extra: Any) -> Any:
+        """Ordinary chat completion - used only for the non-live fallback."""
         return self._client().chat.completions.create(
             model=self.model, messages=messages, **extra
         )
+
+    def _responses_call(self, messages: List[Dict[str, str]], **extra: Any) -> Any:
+        """Agent Tools API call (/v1/responses), where x_search is available."""
+        client = self._client()
+        responses = getattr(client, "responses", None)
+        if responses is None:      # SDK too old to expose the endpoint
+            raise AttributeError("this openai SDK has no .responses endpoint")
+        return responses.create(model=self.model, input=messages, **extra)
+
+    @staticmethod
+    def _responses_text(response: Any) -> str:
+        """Pull the assistant text out of a Responses API result."""
+        text = getattr(response, "output_text", None)
+        if isinstance(text, str) and text.strip():
+            return text
+        parts: List[str] = []
+        for item in getattr(response, "output", None) or []:
+            for block in getattr(item, "content", None) or []:
+                value = getattr(block, "text", None)
+                if isinstance(value, str):
+                    parts.append(value)
+        return "".join(parts)
 
     @staticmethod
     def _content(response: Any) -> str:
@@ -404,7 +409,7 @@ class GrokMindshareClient:
         for holder in (response, getattr(response, "choices", [None])[0] if getattr(response, "choices", None) else None):
             if holder is None:
                 continue
-            for attr in ("citations", "search_results", "sources"):
+            for attr in ("citations", "search_results", "sources", "annotations"):
                 value = getattr(holder, attr, None)
                 if isinstance(value, (list, tuple)):
                     for item in value:
@@ -431,31 +436,46 @@ class GrokMindshareClient:
             {"role": "system", "content": MINDSHARE_SYSTEM_PROMPT},
             {"role": "user", "content": build_prompt(snapshot, window, max_posts)},
         ]
-        schema_arg = {
+        # Structured-output syntax differs between the two endpoints.
+        chat_schema = {
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {"name": "x_mindshare", "strict": True, "schema": MINDSHARE_SCHEMA},
             }
         }
+        responses_schema = {
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "x_mindshare",
+                    "strict": True,
+                    "schema": MINDSHARE_SCHEMA,
+                }
+            }
+        }
 
-        # Walk every tool shape with the strict schema, then every tool shape
-        # without it, then give up on live data entirely. Shape rejections are
-        # free (they fail at deserialization), so breadth here is cheap.
+        # Live X search runs on the Agent Tools API; the non-live fallback runs
+        # on chat completions. Tool-shape rejections fail during request
+        # validation, before any model runs, so trying a few costs no tokens.
         attempts: List[Any] = []
-        for variant in self.search_tool_variants(window):
-            attempts.append(("live_search", True, {"tools": [variant], **schema_arg}))
-        for variant in self.search_tool_variants(window):
-            attempts.append(("live_search", True, {"tools": [variant]}))
-        attempts.append(("model_knowledge", False, schema_arg))
-        attempts.append(("model_knowledge", False, {}))
-        attempts = tuple(attempts)
+        variants = self.search_tool_variants(window)
+        for variant in variants:
+            attempts.append(("x_search", True, True, {"tools": [variant], **responses_schema}))
+        for variant in variants:
+            attempts.append(("x_search", True, True, {"tools": [variant]}))
+        attempts.append(("model_knowledge", False, False, chat_schema))
+        attempts.append(("model_knowledge", False, False, {}))
 
         started = time.monotonic()
         errors: List[str] = []
-        for label, is_live, kwargs in attempts:
+        for label, is_live, via_responses, kwargs in attempts:
             try:
-                response = self._completion(messages, **kwargs)
-                text = self._content(response)
+                if via_responses:
+                    response = self._responses_call(messages, **kwargs)
+                    text = self._responses_text(response)
+                else:
+                    response = self._completion(messages, **kwargs)
+                    text = self._content(response)
                 if not text.strip():
                     raise ValueError("empty response")
                 report = parse_mindshare(extract_json(text), query, self.model, is_live, max_posts)
@@ -467,7 +487,7 @@ class GrokMindshareClient:
             except Exception as exc:  # noqa: BLE001 - try the next, cheaper mode
                 message = f"{type(exc).__name__}: {exc}"[:200]
                 errors.append(message)
-                logger.info("Grok X search attempt (%s) failed: %s", label, message)
+                logger.info("Grok mindshare attempt (%s) failed: %s", label, message)
 
         return MindshareReport(
             query=query,

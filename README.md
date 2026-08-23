@@ -155,22 +155,27 @@ reason about the social data too rather than Grok alone having seen it.
 
 ### A note on the API
 
-Verified against the live API: `/v1/chat/completions` accepts tools of type
-`function` or **`live_search`**. The `x_search` tool people find in xAI's docs
-belongs to the separate **Responses API** (`/v1/responses`) and is rejected here
-with a 422 — an easy and expensive thing to get wrong.
-
-Because xAI's schema moves, the app does not bet on one payload shape. It tries
-several documented Live Search shapes (richest first, minimal last) and keeps
-the first the API accepts; a rejected shape fails at request deserialization,
-before any model runs, so a miss costs no tokens. The call then degrades through
-a chain:
+Server-side X search runs on xAI's **Agent Tools API** — `client.responses.create()`
+against `/v1/responses` — not on chat completions. Established against the live
+API, since the docs and the endpoints disagree:
 
 | Attempt | Result |
 | --- | --- |
-| `live_search` (each shape) + strict JSON schema | live data, structured |
-| `live_search` (each shape), no schema | live data, JSON repaired on parse |
-| no tools | model knowledge, clearly labelled not-live |
+| `x_search` in `chat.completions` `tools` | 422 — `unknown variant`, only `function` or `live_search` accepted there |
+| `live_search` in `chat.completions` `tools` | parses, then **410 — "Live search is deprecated. Please switch to the Agent Tools API"** |
+| `x_search` on `/v1/responses` | ✅ the supported path |
+
+Because the schema moves, the app doesn't bet on one payload shape. It tries the
+documented x_search shapes (richest first, the bare `{"type": "x_search"}` last)
+and keeps the first the API accepts; a rejected shape fails at request
+validation, before any model runs, so a miss costs no tokens. The call then
+degrades through a chain:
+
+| Attempt | Result |
+| --- | --- |
+| `x_search` on `/v1/responses` + strict schema | live data, structured |
+| `x_search` on `/v1/responses`, no schema | live data, JSON repaired on parse |
+| `chat.completions`, no tools | model knowledge, clearly labelled not-live |
 | all failed | unavailable, with the error and a pointer to `check_grok.py` |
 
 The model id, tool name and sources are env vars (`MEMEDD_X_SEARCH_MODEL`,

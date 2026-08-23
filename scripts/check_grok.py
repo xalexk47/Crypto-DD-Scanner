@@ -130,9 +130,14 @@ def main() -> int:
             print(line)
         return 1
 
-    # 5. the live search tool ---------------------------------------------
-    print(f"\n5. Live Search tool ('{config.X_SEARCH_TOOL_TYPE}' on {config.X_SEARCH_MODEL})")
-    print(f"{INFO} Trying each documented payload shape until one is accepted.")
+    # 5. the x_search tool on the Agent Tools API --------------------------
+    print(f"\n5. Agent Tools API — '{config.X_SEARCH_TOOL_TYPE}' on {config.X_SEARCH_MODEL}")
+    print(f"{INFO} Endpoint: /v1/responses (chat.completions rejects x_search, and its")
+    print(f"{INFO}   own live_search alternative returns 410 deprecated)")
+    if getattr(client, "responses", None) is None:
+        print(f"{BAD} This openai SDK has no .responses endpoint. Fix: pip install -U openai")
+        return 2
+
     grok = GrokMindshareClient()
     variants = grok.search_tool_variants(config.X_SEARCH_WINDOW_HOURS)
     accepted = None
@@ -140,30 +145,28 @@ def main() -> int:
         shape = json.dumps(tool)
         label = shape if len(shape) <= 88 else shape[:85] + "..."
         try:
-            response = client.chat.completions.create(
+            response = client.responses.create(
                 model=config.X_SEARCH_MODEL,
-                messages=[
+                input=[
                     {"role": "system", "content": MINDSHARE_SYSTEM_PROMPT},
                     {"role": "user", "content": "Search X for posts about $BRETT on Base in the last 24 hours."},
                 ],
                 tools=[tool],
-                max_tokens=800,
             )
-            text = (response.choices[0].message.content or "").strip()
+            text = (grok._responses_text(response) or "").strip()
             print(f"{OK} shape {index} ACCEPTED: {label}")
-            print(f"{INFO} Answer began: {text[:160]}")
+            print(f"{INFO} Answer began: {text[:200]}")
             accepted = tool
             break
         except Exception as exc:
             reason = str(exc)
-            # Keep the useful part of xAI's deserialization complaints.
-            if "unknown variant" in reason or "unknown field" in reason or "missing field" in reason:
+            if "Failed to deserialize" in reason:
                 reason = reason.split("Failed to deserialize the JSON body into the target type:")[-1].strip()
             print(f"{BAD} shape {index} rejected: {label}")
-            print(f"     {reason[:220]}")
+            print(f"     {reason[:240]}")
 
     if accepted is None:
-        print(f"{BAD} No Live Search payload shape was accepted.")
+        print(f"{BAD} No x_search payload shape was accepted.")
         print(f"{INFO} The app still works — it falls back to a clearly labelled non-live answer.")
         print(f"{INFO} Paste this whole section back to Claude; the error text above names")
         print(f"{INFO}   the fields the API does expect, which is enough to fix it.")

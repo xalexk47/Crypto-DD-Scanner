@@ -123,3 +123,34 @@ class SlowAnthropicClient(FakeAnthropicClient):
 
         time.sleep(self.delay)
         return super()._create(**kwargs)
+
+
+class FakeResponsesClient(FakeOpenAIClient):
+    """Mimics an OpenAI SDK client exposing BOTH endpoints.
+
+    xAI serves server-side tools (x_search) on /v1/responses via
+    ``client.responses.create``, while ordinary completions stay on
+    ``client.chat.completions.create``. Calls to each are recorded separately so
+    tests can assert which endpoint carried which request.
+    """
+
+    def __init__(
+        self,
+        content: str = "",
+        fail_modes: int = 0,
+        error: Optional[Exception] = None,
+        no_responses_endpoint: bool = False,
+    ) -> None:
+        super().__init__(content=content, fail_modes=fail_modes, error=error)
+        self.responses_calls: List[Dict[str, Any]] = []
+        if not no_responses_endpoint:
+            self.responses = SimpleNamespace(create=self._responses_create)
+
+    def _responses_create(self, **kwargs: Any) -> Any:
+        self.responses_calls.append(kwargs)
+        self.calls.append(kwargs)          # keep a single ordered call log too
+        if self.error is not None:
+            raise self.error
+        if len(self.calls) <= self.fail_modes:
+            raise RuntimeError("unknown variant `x_search`")
+        return SimpleNamespace(output_text=self.content, output=[])
