@@ -277,7 +277,8 @@ The feed is fetched once and cached, so per-token lookups are effectively free.
 
 ## Install
 
-Requires **Python 3.11+**.
+Requires **Python 3.9+**. Developed and tested on 3.11; it also runs on the
+3.9 that ships with macOS — no version-specific syntax is used.
 
 ```bash
 git clone https://github.com/xalexk47/Crypto-DD-Scanner.git
