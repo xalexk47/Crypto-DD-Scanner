@@ -280,7 +280,7 @@ def render_result(result: AnalysisResult, settings: config.AppSettings) -> None:
     ui.render_security(result.security)
     st.markdown("")
     ui.render_profile(result.profile)
-    ui.render_narrative(result)
+    ui.render_narrative(result, used_llm=settings.use_llm)
     st.markdown("")
     ui.render_mindshare(result.mindshare)
     st.markdown("")

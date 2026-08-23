@@ -258,8 +258,8 @@ class HeuristicProvider:
         summary = (
             f"{symbol} ({snapshot.name or 'unnamed'}) is {stage} on {chain_label}"
             f"{age_bit}.{social_bit} {move_bit} "
-            f"Narrative read here is heuristic only - metadata, not community sentiment. "
-            f"Enable an LLM provider for a genuine lore and mindshare assessment."
+            f"Narrative read here is heuristic only - built from metadata, "
+            f"not from community sentiment."
         )
         if snapshot.description:
             summary += f" Project self-description: \"{snapshot.description[:280].strip()}\""
@@ -394,6 +394,49 @@ def analyze_narrative(
         fallback = HeuristicProvider().analyze(snapshot, security)
         fallback.mindshare_notes.append(f"LLM narrative unavailable ({type(exc).__name__}); showing heuristics.")
         return fallback
+
+
+def narrative_setup_hint(used_llm: bool = False) -> str:
+    """What the user should actually do to get a model-written narrative.
+
+    Returns "" when nothing needs doing. The old code baked a fixed
+    "enable an LLM provider" sentence into the narrative text itself, which was
+    both wrong layering (it leaked into JSON and Markdown exports) and wrong
+    advice for anyone who had already configured a key -- the toggle was simply
+    off. This inspects the real state instead.
+    """
+    provider = get_provider()
+    if getattr(provider, "name", "") != "heuristic":
+        # A real provider is available.
+        if not used_llm:
+            label = provider.name.replace("xai", "Grok").replace("anthropic", "Claude").replace("openai", "GPT")
+            return (
+                f"{label} is configured and ready — switch on **Use LLM for lore analysis** "
+                f"in the sidebar to replace this with a model-written narrative."
+            )
+        return ""   # it was requested; any failure is reported in mindshare_notes
+
+    configured = (config.LLM_PROVIDER or "none").lower()
+    if configured in ("none", "heuristic"):
+        return (
+            "This is the built-in heuristic narrative. To get a model-written one, set "
+            "`MEMEDD_LLM_PROVIDER=xai` (or anthropic / openai) in `.env`, add the matching "
+            "API key, and restart the app."
+        )
+
+    # A provider is named but cannot run - say exactly why.
+    provider_cls = PROVIDERS.get(configured)
+    reason = ""
+    if provider_cls is not None:
+        try:
+            reason = provider_cls().unavailable_reason()
+        except Exception:  # noqa: BLE001 - a broken provider must not break the hint
+            reason = ""
+    return (
+        f"`MEMEDD_LLM_PROVIDER={configured}` is set but unavailable"
+        + (f": {reason}" if reason else ".")
+        + " Fix that and restart — `.env` is only read at startup."
+    )
 
 
 def llm_status() -> str:

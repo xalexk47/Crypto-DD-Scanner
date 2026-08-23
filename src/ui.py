@@ -370,13 +370,22 @@ def render_security(security: Optional[SecurityReport]) -> None:
             st.dataframe(frame, use_container_width=True, hide_index=True)
 
 
-def render_narrative(result: AnalysisResult) -> None:
+def render_narrative(result: AnalysisResult, used_llm: bool = False) -> None:
     narrative = result.narrative
     if narrative is None:
         return
     label = narrative.source if narrative.source != "heuristic" else "heuristic placeholder"
     st.markdown(f"#### 📖 Lore & narrative <span class='mdd-badge'>{label}</span>", unsafe_allow_html=True)
     st.markdown(f'<div class="mdd-card">{narrative.summary}</div>', unsafe_allow_html=True)
+
+    # Tell the user what to actually do, based on the real provider state,
+    # rather than a fixed "enable an LLM provider" line in the narrative text.
+    if narrative.source == "heuristic":
+        from .llm import narrative_setup_hint
+
+        hint = narrative_setup_hint(used_llm)
+        if hint:
+            st.info(hint, icon="💡")
     if narrative.themes:
         st.markdown(
             " ".join(f'<span class="mdd-badge">{theme}</span>' for theme in narrative.themes),
