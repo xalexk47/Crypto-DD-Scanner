@@ -36,6 +36,9 @@ DexScreener URLs work too) and get, per token:
   ladder, estimated price impact and a liquidity-adjusted size warning.
 - **Export** — download any report as Markdown or JSON.
 
+Chains: **Base** (default), Ethereum, Solana, BNB Chain, Arbitrum and
+**Robinhood Chain** — switchable in the sidebar.
+
 ### 📡 Scanner
 Sweeps DexScreener for candidates on the selected chain, filters them
 (market cap $500k–$5M by default, plus minimum liquidity, volume, trade count
@@ -355,7 +358,26 @@ Add an entry to `CHAINS` in `src/config.py`:
 ```
 
 Optionally add seed search terms to `SCANNER_SEED_QUERIES` so Scanner mode has
-something to sweep. Base, Ethereum, Solana, BNB Chain and Arbitrum ship enabled.
+something to sweep. Base, Ethereum, Solana, BNB Chain, Arbitrum and Robinhood
+Chain ship enabled.
+
+### Chains without a security provider
+
+Set `goplus_id=None` when GoPlus does not cover the chain, and add an entry to
+`SECURITY_PROVIDER_NOTES` explaining what cannot be checked. The app then:
+
+- skips the security call entirely (no pointless request),
+- scores the security pillar at 40/100 with 0.25 confidence — unknown is
+  penalised, never treated as clean,
+- shows your note in the sidebar the moment the chain is selected, and again in
+  place of the rug-check panel, so a blank section is never mistaken for a pass,
+- sizes positions down accordingly, since conviction feeds the risk calculator.
+
+**Robinhood Chain** is the shipped example. It is an Arbitrum Orbit L2
+(chain id 4663, ETH gas, mainnet since 1 July 2026) that DexScreener indexes but
+GoPlus does not support, so market data, scoring, narrative, the LLM ensemble and
+position sizing all work there — only the automated rug checks cannot run.
+Verify contracts by hand before trading on it.
 
 ---
 
@@ -367,6 +389,10 @@ something to sweep. Base, Ethereum, Solana, BNB Chain and Arbitrum ship enabled.
   is searching for or promoting may not surface.
 - **Security coverage varies.** GoPlus has no record for very new tokens; those
   reports come back `unavailable` and are scored conservatively rather than skipped.
+- **Robinhood Chain has no automated rug checks at all.** GoPlus does not support
+  chain 4663, so honeypot, tax, mint-authority, LP-lock and holder-concentration
+  checks cannot run there. Everything else works; the security pillar is
+  penalised and the gap is stated in the UI.
 - **Narrative is heuristic until you add a key.** Without an LLM key the
   narrative reads metadata, not community sentiment. It says so in every report.
 - **The ensemble judges the payload, not the chain.** The models see only what

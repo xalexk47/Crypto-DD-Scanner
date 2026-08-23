@@ -757,7 +757,9 @@ def fetch_security_report(address: str, chain: str, use_cache: bool = True) -> S
     else:
         return SecurityReport(
             address=address, chain=chain_cfg.key, available=False,
-            error=f"No security provider configured for {chain_cfg.label}.",
+            error=config.SECURITY_PROVIDER_NOTES.get(
+                chain_cfg.key, f"No security provider configured for {chain_cfg.label}."
+            ),
         )
 
     try:

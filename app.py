@@ -130,6 +130,10 @@ def render_sidebar() -> config.AppSettings:
             format_func=lambda key: config.CHAINS[key].label,
             help="Base is the default target. Everything else works too — the pipeline is chain-agnostic.",
         )
+        # Some chains have no contract-security provider. Say so up front rather
+        # than letting a blank rug-check section imply a clean bill of health.
+        if chain in config.SECURITY_PROVIDER_NOTES:
+            st.warning(config.SECURITY_PROVIDER_NOTES[chain], icon="⚠️")
 
         st.markdown("#### Risk profile")
         portfolio_usd = st.number_input(

@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 try:  # python-dotenv is optional at runtime
     from dotenv import load_dotenv
@@ -92,6 +92,31 @@ CHAINS: Dict[str, ChainConfig] = {
         goplus_id="42161",
         address_kind="evm",
         explorer_token_url="https://arbiscan.io/token/{address}",
+    ),
+    # Robinhood Chain: Arbitrum Orbit L2 (chain id 4663), mainnet since
+    # 2026-07-01, ETH gas. DexScreener indexes it; GoPlus does NOT support
+    # 4663, so goplus_id stays None and every token here is scored with
+    # security marked unavailable (penalised, low confidence) rather than
+    # silently assumed safe. See SECURITY_PROVIDER_NOTES below.
+    "robinhood": ChainConfig(
+        key="robinhood",
+        label="Robinhood Chain",
+        dexscreener_id="robinhood",
+        goplus_id=None,
+        address_kind="evm",
+        explorer_token_url="https://robinhoodchain.blockscout.com/token/{address}",
+    ),
+}
+
+
+# Chains with no contract-security provider, and why. Surfaced in the UI so a
+# missing rug check is never mistaken for a clean rug check.
+SECURITY_PROVIDER_NOTES: Dict[str, str] = {
+    "robinhood": (
+        "GoPlus does not support Robinhood Chain (id 4663), so honeypot, tax, "
+        "mint-authority, LP-lock and holder-concentration checks cannot run here. "
+        "Scores fall back to market data only, with the security pillar penalised "
+        "and confidence reduced. Verify contracts manually before trading."
     ),
 }
 
@@ -273,6 +298,9 @@ SCANNER_SEED_QUERIES: Dict[str, list] = {
     "solana": ["SOL", "USDC sol", "bonk", "wif", "pump"],
     "bsc": ["WBNB", "USDT bsc", "meme"],
     "arbitrum": ["WETH arbitrum", "USDC arbitrum"],
+    # Robinhood Chain skews tokenized equities / RWA rather than memes, so the
+    # seeds lean on the majors and the chain's own names.
+    "robinhood": ["robinhood", "HOOD", "WETH", "USDC", "meme robinhood"],
 }
 
 
@@ -313,8 +341,11 @@ class AppSettings:
     use_llm: bool = False
     # Multi-model ensemble (Grok + Claude + GPT in parallel).
     use_ensemble: bool = False
-    ensemble_providers: tuple = ENSEMBLE_PROVIDERS
-    blend_weight: float = ENSEMBLE_BLEND_WEIGHT
+    # default_factory, not a bare default: a plain default would bind the
+    # module value at import time and then ignore any later change to it,
+    # which silently freezes whatever the developer's .env said at startup.
+    ensemble_providers: Tuple[str, ...] = field(default_factory=lambda: ENSEMBLE_PROVIDERS)
+    blend_weight: float = field(default_factory=lambda: ENSEMBLE_BLEND_WEIGHT)
 
     def risk(self) -> RiskProfile:
         return RISK_PROFILES.get(self.risk_profile, RISK_PROFILES[DEFAULT_RISK_PROFILE])
