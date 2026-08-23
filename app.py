@@ -259,7 +259,7 @@ def render_sidebar() -> config.AppSettings:
                 st.caption(f"Raw total {total}% — normalised back to 100%.")
 
         st.divider()
-        if st.button("🔄 Refresh data (clear caches)", use_container_width=True):
+        if st.button("🔄 Refresh data (clear caches)", **ui.stretch()):
             st.cache_data.clear()
             data_fetchers.clear_caches()
             mindshare.clear_cache()
@@ -327,7 +327,7 @@ def render_result(result: AnalysisResult, settings: config.AppSettings) -> None:
         data=report.to_markdown(result),
         file_name=report.filename_for(result, "md"),
         mime="text/markdown",
-        use_container_width=True,
+        **ui.stretch(),
         key=f"md_{result.address}",
     )
     col2.download_button(
@@ -335,7 +335,7 @@ def render_result(result: AnalysisResult, settings: config.AppSettings) -> None:
         data=report.to_json(result),
         file_name=report.filename_for(result, "json"),
         mime="application/json",
-        use_container_width=True,
+        **ui.stretch(),
         key=f"json_{result.address}",
     )
 
@@ -389,7 +389,7 @@ def tab_analyzer(settings: config.AppSettings) -> None:
     )
 
     col1, col2 = st.columns([1, 4])
-    analyze_clicked = col1.button("🚀 Analyze", type="primary", use_container_width=True)
+    analyze_clicked = col1.button("🚀 Analyze", type="primary", **ui.stretch())
 
     addresses, invalid = parse_addresses(raw)
     if invalid:
@@ -432,7 +432,7 @@ def tab_analyzer(settings: config.AppSettings) -> None:
             ]
         ).sort_values("Score", ascending=False)
         st.markdown("##### Batch summary")
-        st.dataframe(summary, use_container_width=True, hide_index=True)
+        st.dataframe(summary, **ui.stretch(), hide_index=True)
         st.divider()
 
         for result in sorted(results, key=lambda r: r.composite, reverse=True):
@@ -499,7 +499,7 @@ def tab_scanner(settings: config.AppSettings) -> None:
     st.markdown(f"##### {len(candidates)} candidates on {config.get_chain(settings.chain).label}")
     st.dataframe(
         frame,
-        use_container_width=True,
+        **ui.stretch(),
         hide_index=True,
         column_config={
             "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%.0f"),
@@ -527,7 +527,7 @@ def tab_scanner(settings: config.AppSettings) -> None:
         label_visibility="collapsed",
     )
     col1, col2 = st.columns([1, 4])
-    if col1.button("🔬 Full analysis", type="primary", use_container_width=True):
+    if col1.button("🔬 Full analysis", type="primary", **ui.stretch()):
         address = candidates[selected].snapshot.address
         run_analysis([address], settings)
         st.session_state["pending_address"] = address
@@ -583,11 +583,99 @@ def render_latest_profiles(settings: config.AppSettings) -> None:
                 if links:
                     st.caption(links)
             with col2:
-                if st.button("Analyze", key=f"profile_{index}", use_container_width=True):
+                if st.button("Analyze", key=f"profile_{index}", **ui.stretch()):
                     run_analysis([profile.address], settings)
                     st.session_state["pending_address"] = profile.address
                     st.success("Analyzed — see the **CA Analyzer** tab.")
             st.divider()
+
+
+# ==========================================================================
+# Tab: Watchlist
+# ==========================================================================
+def tab_watchlist(settings: config.AppSettings) -> None:
+    """Curate the smart-money list: wallets and X handles you trust.
+
+    This is the bridge to services that have no usable API. Browse GMGN,
+    Cielo, Arkham or Nansen, decide who is worth following, paste them here,
+    and the app flags them on-chain from free Etherscan data and asks Grok
+    about the handles by name.
+    """
+    st.markdown("#### ⭐ Smart-money watchlist")
+    st.caption(
+        "The highest-precision signal in the app, because the judgement is yours. "
+        "Stored in `data/smart_money.json`, which is gitignored — it never leaves your machine."
+    )
+
+    current = wallet_flow.load_watchlist()
+    wallet_lines = "\n".join(
+        f"{addr}, {label}" if label else addr for addr, label in current["wallets"].items()
+    )
+
+    col1, col2 = st.columns([3, 2], gap="large")
+    with col1:
+        st.markdown("**Wallets**")
+        wallets_raw = st.text_area(
+            "Wallets",
+            value=wallet_lines,
+            height=260,
+            label_visibility="collapsed",
+            placeholder=(
+                "0x532f27101965dd16442E59d40670FaF5eBB142E4, caught BRETT early\n"
+                "0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed, GMGN top win-rate 30d"
+            ),
+            help="One per line. Address first, then an optional label after a comma or tab.",
+        )
+        st.caption(
+            "Paste straight from a GMGN or Cielo leaderboard — commas, tabs and plain "
+            "spaces all work, invalid rows are skipped, duplicates are collapsed."
+        )
+    with col2:
+        st.markdown("**X handles**")
+        handles_raw = st.text_area(
+            "X handles",
+            value="\n".join(current["x_handles"]),
+            height=260,
+            label_visibility="collapsed",
+            placeholder="someanalyst\nonchainwhale",
+            help="One per line, with or without the @.",
+        )
+        st.caption(
+            "Handed to Grok, which then reports whether **these specific accounts** "
+            "posted about a token rather than generic chatter."
+        )
+
+    parsed = wallet_flow.parse_watchlist_input(wallets_raw)
+    handles = [h.strip().lstrip("@") for h in handles_raw.splitlines() if h.strip()]
+
+    left, right = st.columns([1, 3])
+    if left.button("💾 Save watchlist", type="primary", **ui.stretch()):
+        path = wallet_flow.save_watchlist(parsed, handles)
+        wallet_flow.clear_cache()
+        st.success(f"Saved {len(parsed)} wallet(s) and {len(handles)} handle(s) to `{path}`.")
+    right.caption(
+        f"Will save **{len(parsed)}** valid wallet(s) and **{len(handles)}** handle(s). "
+        + (f"{len(wallets_raw.strip().splitlines()) - len(parsed)} line(s) will be skipped as invalid."
+           if wallets_raw.strip() and len(wallets_raw.strip().splitlines()) > len(parsed) else "")
+    )
+
+    with st.expander("Where to find wallets worth watching"):
+        st.markdown(
+            "- **GMGN** — its smart-money and top-trader leaderboards rank wallets by "
+            "realised win rate. There is no self-serve public API (access is whitelist-only "
+            "and rate limited), so copying the wallets you rate into this list is the "
+            "practical way to use it.\n"
+            "- **Cielo** — its feed and wallet PnL are behind the $199/mo Whale plan. If you "
+            "subscribe, export wallets and paste them here; you get the same per-token "
+            "detection without the app needing the API.\n"
+            "- **Arkham / Nansen** — entity labels and smart-money tags.\n"
+            "- **Your own history** — wallets you noticed early on something that worked. "
+            "Often the best list of all, because nobody else is watching it."
+        )
+        st.caption(
+            "Whatever the source, the app flags these wallets from free Etherscan transfer "
+            "data — so the paid part is the discovery, not the monitoring."
+        )
 
 
 # ==========================================================================
@@ -614,7 +702,7 @@ def tab_history(settings: config.AppSettings) -> None:
     )
     st.dataframe(
         display,
-        use_container_width=True,
+        **ui.stretch(),
         hide_index=True,
         column_config={
             "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%.0f"),
@@ -641,7 +729,7 @@ def tab_history(settings: config.AppSettings) -> None:
             st.success("Re-analyzed — open the **CA Analyzer** tab for the full report.")
     with col2:
         st.markdown("&nbsp;", unsafe_allow_html=True)
-        if st.button("🗑️ Clear history", use_container_width=True):
+        if st.button("🗑️ Clear history", **ui.stretch()):
             history.clear()
             st.rerun()
 
@@ -660,11 +748,15 @@ def main() -> None:
         "security, liquidity, distribution, momentum and position sizing in one pass.",
     )
 
-    analyzer_tab, scanner_tab, history_tab = st.tabs(["🔍 CA Analyzer", "📡 Scanner", "🕘 History"])
+    analyzer_tab, scanner_tab, watchlist_tab, history_tab = st.tabs(
+        ["🔍 CA Analyzer", "📡 Scanner", "⭐ Watchlist", "🕘 History"]
+    )
     with analyzer_tab:
         tab_analyzer(settings)
     with scanner_tab:
         tab_scanner(settings)
+    with watchlist_tab:
+        tab_watchlist(settings)
     with history_tab:
         tab_history(settings)
 

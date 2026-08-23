@@ -85,6 +85,60 @@ def load_watchlist(path: Optional[Any] = None) -> Dict[str, Any]:
     return {"wallets": wallets, "x_handles": handles}
 
 
+def parse_watchlist_input(raw: str) -> List[Dict[str, str]]:
+    """Parse pasted wallet lines into ``{address, label}`` entries.
+
+    Accepts what people actually paste out of GMGN, Cielo, Arkham or a
+    spreadsheet: one entry per line, address first, an optional label after a
+    comma, tab or whitespace. Anything that is not a valid address is skipped
+    rather than rejected, so one bad row does not lose the paste.
+    """
+    import re
+
+    from .utils import is_valid_address
+
+    entries: List[Dict[str, str]] = []
+    seen = set()
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in re.split(r"[,\t]", line, maxsplit=1)]
+        address = parts[0].split()[0] if parts[0] else ""
+        label = parts[1] if len(parts) > 1 else ""
+        if not label and " " in parts[0]:
+            address, _, label = parts[0].partition(" ")
+        if not is_valid_address(address):
+            continue
+        key = normalize_address(address)
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append({"address": address, "label": label.strip()})
+    return entries
+
+
+def save_watchlist(
+    wallets: List[Dict[str, str]],
+    x_handles: List[str],
+    path: Optional[Any] = None,
+) -> str:
+    """Write the watchlist to disk. Returns the path written."""
+    target = path or config.SMART_MONEY_PATH
+    payload = {
+        "_comment": "Managed from the MemeDD Watchlist tab. Gitignored - this stays yours.",
+        "wallets": wallets,
+        "x_handles": [h.strip().lstrip("@") for h in x_handles if h.strip()],
+    }
+    target = str(target)
+    import os
+
+    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+    with open(target, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    return target
+
+
 def watchlist_handles(path: Optional[Any] = None) -> List[str]:
     """X handles the user nominated as smart money (used by the Grok prompt)."""
     return load_watchlist(path).get("x_handles", [])

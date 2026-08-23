@@ -333,3 +333,61 @@ class TestEnsembleHandoff:
         assert payload["onchain_wallet_flow"]["wallets_accumulating"] == 9
         # The models must be told this is behaviour, not a skill rating.
         assert "not a claim about anyone's skill" in payload["onchain_wallet_flow"]["note"]
+
+
+class TestWatchlistEditing:
+    """Parsing pasted leaderboard exports (GMGN, Cielo, spreadsheets)."""
+
+    def test_accepts_comma_tab_and_space_separators(self):
+        raw = (
+            "0x532f27101965dd16442E59d40670FaF5eBB142E4, caught BRETT early\n"
+            "0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed\tGMGN top winrate 30d\n"
+            "0x36a46dff597c5a444bbc521d26787f57867d2214 cielo smart money\n"
+        )
+        parsed = wf.parse_watchlist_input(raw)
+
+        assert len(parsed) == 3
+        assert parsed[0]["label"] == "caught BRETT early"
+        assert parsed[1]["label"] == "GMGN top winrate 30d"
+        assert parsed[2]["label"] == "cielo smart money"
+
+    def test_bare_addresses_need_no_label(self):
+        parsed = wf.parse_watchlist_input("0x532f27101965dd16442E59d40670FaF5eBB142E4")
+        assert parsed == [{"address": "0x532f27101965dd16442E59d40670FaF5eBB142E4", "label": ""}]
+
+    def test_invalid_rows_are_skipped_not_fatal(self):
+        """One bad row must not lose the whole paste."""
+        raw = (
+            "not-an-address, junk\n"
+            "# a comment line\n"
+            "\n"
+            "0x532f27101965dd16442E59d40670FaF5eBB142E4, good\n"
+        )
+        parsed = wf.parse_watchlist_input(raw)
+        assert len(parsed) == 1
+        assert parsed[0]["label"] == "good"
+
+    def test_duplicates_collapse_case_insensitively(self):
+        addr = "0x532f27101965dd16442E59d40670FaF5eBB142E4"
+        parsed = wf.parse_watchlist_input(f"{addr}, first\n{addr.lower()}, second\n")
+        assert len(parsed) == 1
+
+    def test_empty_input_is_empty_list(self):
+        assert wf.parse_watchlist_input("") == []
+        assert wf.parse_watchlist_input("   \n\n  ") == []
+
+    def test_save_then_load_round_trips(self, tmp_path):
+        path = tmp_path / "sm.json"
+        wallets = wf.parse_watchlist_input(
+            "0x532f27101965dd16442E59d40670FaF5eBB142E4, whale one"
+        )
+        wf.save_watchlist(wallets, ["@analyst", "onchain"], path)
+
+        loaded = wf.load_watchlist(path)
+        assert loaded["wallets"]["0x532f27101965dd16442e59d40670faf5ebb142e4"] == "whale one"
+        assert loaded["x_handles"] == ["analyst", "onchain"]      # @ stripped on save
+
+    def test_saving_creates_the_directory(self, tmp_path):
+        path = tmp_path / "nested" / "dir" / "sm.json"
+        wf.save_watchlist([], ["someone"], path)
+        assert wf.load_watchlist(path)["x_handles"] == ["someone"]

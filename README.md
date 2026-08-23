@@ -138,7 +138,24 @@ which no free explorer API exposes, and is exactly what paid services like Cielo
 number with nothing behind it, which is worse than no number. Everything here is
 an **observation about behaviour**, never a claim about anyone's skill.
 
-### The watchlist is the sharp edge
+### The watchlist is the sharp edge — and the bridge to GMGN/Cielo
+
+**GMGN** has no self-serve public API: access is whitelist-only (you submit a
+transaction address, invite code and IP) and rate limited to 2 req/sec, and the
+third-party scrapers around it are fragile and paid. **Cielo**'s wallet PnL is
+behind the $199/mo Whale plan. Neither can be integrated the way Etherscan can.
+
+The watchlist is how you use them anyway. Their real value is *discovery* —
+ranking wallets by realised win rate, something free data cannot reproduce.
+So do the discovery there, paste the wallets you rate into the **⭐ Watchlist**
+tab, and this app does the *monitoring* from free Etherscan data: it flags those
+wallets by name whenever they appear in any token's flow, and hands your X
+handles to Grok so the mindshare panel reports on those specific accounts.
+
+Paid discovery, free monitoring — and no subscription needed for the part that
+runs on every token you analyze.
+
+
 
 ```bash
 cp data/smart_money.example.json data/smart_money.json
@@ -471,7 +488,7 @@ src/
   ui.py                 Reusable Streamlit components + CSS
   utils.py              Formatting, address parsing, safe coercion, TTL cache
   scripts/check_grok.py Diagnose your Grok key, models and X search access
-tests/                  264 unit + end-to-end tests (network and LLMs stubbed)
+tests/                  271 unit + end-to-end tests (network and LLMs stubbed)
 .streamlit/config.toml  Dark theme
 ```
 

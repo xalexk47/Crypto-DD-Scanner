@@ -6,7 +6,8 @@ visual language (cards, score bars, badges) is defined in exactly one place.
 
 from __future__ import annotations
 
-from typing import Iterable, List, Optional
+import inspect
+from typing import Any, Dict, Iterable, List, Optional
 
 import streamlit as st
 
@@ -115,6 +116,18 @@ CUSTOM_CSS = """
 }
 </style>
 """
+
+
+# Streamlit renamed `use_container_width` to `width` and now warns on every
+# render with the old name. Detect which the installed version accepts rather
+# than pinning a floor, so the app stays quiet on new Streamlit and working on
+# old.
+_WIDTH_PARAM_SUPPORTED = "width" in inspect.signature(st.dataframe).parameters
+
+
+def stretch() -> Dict[str, Any]:
+    """Kwargs that make a widget fill its container, on any Streamlit version."""
+    return {"width": "stretch"} if _WIDTH_PARAM_SUPPORTED else {"use_container_width": True}
 
 
 def inject_css() -> None:
@@ -367,7 +380,7 @@ def render_security(security: Optional[SecurityReport]) -> None:
                     for h in security.top_holders
                 ]
             )
-            st.dataframe(frame, use_container_width=True, hide_index=True)
+            st.dataframe(frame, **stretch(), hide_index=True)
 
 
 def render_narrative(result: AnalysisResult, used_llm: bool = False) -> None:
@@ -443,7 +456,7 @@ def render_risk_plan(result: AnalysisResult) -> None:
                 for t in plan.take_profit_targets
             ]
         )
-        st.dataframe(frame, use_container_width=True, hide_index=True)
+        st.dataframe(frame, **stretch(), hide_index=True)
 
     with st.expander("How this size was calculated"):
         for note in plan.notes:
@@ -710,12 +723,12 @@ def render_wallet_flow(flow: Optional[WalletFlowReport], chain_key: str = "") ->
             with left_col:
                 st.markdown("**Accumulating**")
                 data = frame(flow.top_accumulators, "acc")
-                st.dataframe(data, use_container_width=True, hide_index=True) if data is not None \
+                st.dataframe(data, **stretch(), hide_index=True) if data is not None \
                     else st.caption("None.")
             with right_col:
                 st.markdown("**Distributing**")
                 data = frame(flow.top_distributors, "dist")
-                st.dataframe(data, use_container_width=True, hide_index=True) if data is not None \
+                st.dataframe(data, **stretch(), hide_index=True) if data is not None \
                     else st.caption("None.")
             st.caption(
                 "Observed transfer behaviour only — this says nothing about any wallet's "
