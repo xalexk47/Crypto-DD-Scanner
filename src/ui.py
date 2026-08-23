@@ -11,7 +11,8 @@ from typing import Iterable, List, Optional
 import streamlit as st
 
 from . import config
-from .models import AnalysisResult, EnsembleResult, ScoreCard, SecurityReport, TokenProfile, TokenSnapshot
+from .models import (AnalysisResult, EnsembleResult, MindshareReport, ScoreCard,
+                     SecurityReport, TokenProfile, TokenSnapshot)
 from .utils import fmt_number, fmt_pct, fmt_usd, score_color, score_emoji, short_address
 
 # --------------------------------------------------------------------------
@@ -97,6 +98,13 @@ CUSTOM_CSS = """
 .mdd-agree-track { height: 7px; background: #0d141c; border: 1px solid var(--mdd-border); border-radius: 999px; overflow: hidden; margin-top: .3rem; }
 .mdd-agree-fill { height: 100%; border-radius: 999px; }
 .mdd-fail { color: #f97316; font-size: .82rem; }
+.mdd-post { background: var(--mdd-card-2); border: 1px solid var(--mdd-border); border-radius: 10px;
+            padding: .6rem .75rem; margin-bottom: .5rem; }
+.mdd-post-handle { color: var(--mdd-accent); font-weight: 600; font-size: .82rem; }
+.mdd-post-text { font-size: .87rem; margin-top: .25rem; line-height: 1.45; }
+.mdd-post-meta { color: var(--mdd-muted); font-size: .74rem; margin-top: .3rem; }
+.mdd-live { background: #052e16; color: #22c55e; border-color: #22c55e55; }
+.mdd-stale { background: #2e2405; color: #eab308; border-color: #eab30855; }
 
 /* Phones: stop Streamlit metric labels wrapping into unreadable slivers. */
 @media (max-width: 640px) {
@@ -470,6 +478,128 @@ def _agreement_bar(agreement: float) -> str:
         f'<div class="mdd-agree-track"><div class="mdd-agree-fill" '
         f'style="width:{max(0.0, min(1.0, agreement)) * 100:.0f}%;background:{color};"></div></div>'
     )
+
+
+_SENTIMENT_COLORS = {
+    "bullish": "#22c55e", "mixed": "#eab308", "bearish": "#ef4444",
+    "quiet": "#8b98a9", "unknown": "#8b98a9",
+}
+_VOLUME_BARS = {"none": 5, "low": 25, "moderate": 55, "high": 80, "viral": 100}
+
+
+def render_mindshare(mindshare: Optional[MindshareReport]) -> None:
+    """Render the X/Twitter mindshare panel from Grok's search."""
+    if mindshare is None:
+        return
+
+    st.markdown("#### 𝕏 Mindshare <span class='mdd-badge'>grok</span>", unsafe_allow_html=True)
+
+    if not mindshare.available:
+        st.info(
+            (mindshare.error or "X mindshare was not requested.")
+            + "  Run `python scripts/check_grok.py` to diagnose.",
+            icon="𝕏",
+        )
+        return
+
+    # The live/stale distinction is the most important thing on this panel:
+    # stale model knowledge must never read as current sentiment.
+    if mindshare.is_live:
+        badge = '<span class="mdd-badge mdd-live">● LIVE X SEARCH</span>'
+    else:
+        badge = '<span class="mdd-badge mdd-stale">⚠ NOT LIVE — model knowledge</span>'
+
+    color = _SENTIMENT_COLORS.get(mindshare.sentiment, "#8b98a9")
+    organic = (
+        "organic" if mindshare.is_organic
+        else ("coordinated / bots" if mindshare.is_organic is False else "unclear")
+    )
+
+    left, right = st.columns([1, 2], gap="large")
+    with left:
+        st.markdown(
+            f"""
+            <div class="mdd-card" style="text-align:center;">
+              <div>{badge}</div>
+              <div class="mdd-score-num" style="color:{color};margin-top:.6rem;">
+                {mindshare.mindshare_score:.0f}<span class="mdd-score-den">/100</span>
+              </div>
+              <div class="mdd-note">attention right now</div>
+              <div style="margin-top:.7rem;">
+                <span class="mdd-badge" style="color:{color};border-color:{color}55;">
+                  {mindshare.sentiment.title()}
+                </span>
+                <span class="mdd-badge">{mindshare.post_volume} volume</span>
+              </div>
+              <div class="mdd-note" style="margin-top:.6rem;">
+                trend: {mindshare.trend} · {organic}
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with right:
+        bars = score_bar_html(
+            "Post volume", _VOLUME_BARS.get(mindshare.post_volume, 0),
+            caption=mindshare.post_volume,
+        ) + score_bar_html(
+            "Sentiment", (mindshare.sentiment_score + 1) / 2 * 100,
+            caption=f"{mindshare.sentiment_score:+.2f}",
+        ) + score_bar_html(
+            "Attention", mindshare.mindshare_score, caption=f"{mindshare.mindshare_score:.0f}/100",
+        )
+        summary = mindshare.summary or "No summary returned."
+        st.markdown(
+            f'<div class="mdd-card"><h3>What X is saying</h3>'
+            f'<div class="mdd-quote">{summary}</div>{bars}</div>',
+            unsafe_allow_html=True,
+        )
+
+    if mindshare.themes:
+        st.markdown(
+            " ".join(f'<span class="mdd-badge">{theme}</span>' for theme in mindshare.themes),
+            unsafe_allow_html=True,
+        )
+
+    for flag in mindshare.red_flags:
+        st.error(f"X red flag: {flag}", icon="🚩")
+    if mindshare.is_organic is False:
+        st.warning(
+            "This discussion reads as coordinated rather than organic — the momentum "
+            "score has been discounted accordingly.",
+            icon="🤖",
+        )
+    for warning in mindshare.warnings:
+        st.warning(warning, icon="⚠️")
+
+    if mindshare.sample_posts:
+        with st.expander(f"Sample posts ({len(mindshare.sample_posts)})", expanded=True):
+            for post in mindshare.sample_posts:
+                meta = []
+                if post.engagement:
+                    meta.append(f"{post.engagement:,} engagements")
+                if post.posted_at:
+                    meta.append(post.posted_at)
+                link = f' · <a href="{post.url}" target="_blank">open</a>' if post.url else ""
+                st.markdown(
+                    f"""
+                    <div class="mdd-post">
+                      <div class="mdd-post-handle">@{post.handle or "unknown"}</div>
+                      <div class="mdd-post-text">{post.text}</div>
+                      <div class="mdd-post-meta">{" · ".join(meta)}{link}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            st.caption(
+                "Posts are reported by the model from its search. Spot-check anything "
+                "you intend to act on — models can paraphrase or misattribute."
+            )
+
+    if mindshare.notable_accounts:
+        st.caption("Notable accounts: " + ", ".join(f"@{h}" for h in mindshare.notable_accounts))
+    footer = [f"Query: `{mindshare.query}`", f"{mindshare.latency_ms / 1000:.1f}s", mindshare.model]
+    st.caption(" · ".join(x for x in footer if x))
 
 
 def render_ensemble(ensemble: Optional[EnsembleResult], deterministic: Optional[ScoreCard] = None) -> None:

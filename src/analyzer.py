@@ -12,7 +12,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Sequence, Tuple
 
-from . import config, data_fetchers, llm, llm_analyzers, scorers
+from . import config, data_fetchers, llm, llm_analyzers, mindshare as mindshare_mod, scorers
 from .models import AnalysisResult, ScanCandidate, TokenSnapshot
 from .utils import normalize_address, utcnow_iso
 
@@ -70,12 +70,23 @@ def analyze_token(
     if security.total_supply and snapshot.total_supply is None:
         snapshot.total_supply = security.total_supply
 
+    # --- 2b. X / Twitter mindshare via Grok -------------------------------
+    # Runs before scoring so the momentum pillar can use real social data
+    # instead of only the volume/price proxy.
+    if settings.use_x_search:
+        report = mindshare_mod.fetch_mindshare(snapshot, use_cache=use_cache)
+        result.mindshare = report
+        if not report.available and report.error:
+            result.data_warnings.append(f"X mindshare: {report.error}")
+
     # --- 3. narrative (heuristic today, LLM-ready) -----------------------
     provider_name = None if settings.use_llm else "heuristic"
     result.narrative = llm.analyze_narrative(snapshot, security, provider_name=provider_name)
 
     # --- 4. score --------------------------------------------------------
-    scorecard = scorers.build_scorecard(snapshot, security, result.narrative, weights=settings.weights)
+    scorecard = scorers.build_scorecard(
+        snapshot, security, result.narrative, weights=settings.weights, mindshare=result.mindshare,
+    )
     result.scorecard = scorecard
 
     # --- 5. position sizing ---------------------------------------------
@@ -97,6 +108,7 @@ def analyze_token(
             security,
             scorecard,
             profile=result.profile,
+            mindshare=result.mindshare,
             providers=settings.ensemble_providers,
             blend_weight=settings.blend_weight,
         )

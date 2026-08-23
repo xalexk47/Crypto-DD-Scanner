@@ -17,7 +17,7 @@ from typing import List
 import pandas as pd
 import streamlit as st
 
-from src import config, data_fetchers, history, llm, llm_analyzers, report, ui
+from src import config, data_fetchers, history, llm, llm_analyzers, mindshare, report, ui
 from src.analyzer import analyze_many, analyze_token, scan
 from src.models import AnalysisResult, ScanCandidate
 from src.utils import fmt_usd, parse_addresses, score_emoji, short_address
@@ -42,12 +42,13 @@ st.set_page_config(
 @st.cache_data(ttl=config.CACHE_TTL_TOKEN, show_spinner=False)
 def cached_analyze(
     address: str, chain: str, portfolio_usd: float, risk_profile: str, use_llm: bool,
-    use_ensemble: bool, providers: tuple, blend_weight: float, nonce: int
+    use_ensemble: bool, providers: tuple, blend_weight: float, use_x_search: bool, nonce: int
 ) -> AnalysisResult:
     """Analyze one address.  ``nonce`` busts the cache on a manual refresh."""
     settings = config.AppSettings(
         chain=chain, portfolio_usd=portfolio_usd, risk_profile=risk_profile, use_llm=use_llm,
         use_ensemble=use_ensemble, ensemble_providers=providers, blend_weight=blend_weight,
+        use_x_search=use_x_search,
     )
     return analyze_token(address, settings)
 
@@ -55,11 +56,12 @@ def cached_analyze(
 @st.cache_data(ttl=config.CACHE_TTL_TOKEN, show_spinner=False)
 def cached_analyze_many(
     addresses: List[str], chain: str, portfolio_usd: float, risk_profile: str, use_llm: bool,
-    use_ensemble: bool, providers: tuple, blend_weight: float, nonce: int
+    use_ensemble: bool, providers: tuple, blend_weight: float, use_x_search: bool, nonce: int
 ) -> List[AnalysisResult]:
     settings = config.AppSettings(
         chain=chain, portfolio_usd=portfolio_usd, risk_profile=risk_profile, use_llm=use_llm,
         use_ensemble=use_ensemble, ensemble_providers=providers, blend_weight=blend_weight,
+        use_x_search=use_x_search,
     )
     return analyze_many(addresses, settings)
 
@@ -166,6 +168,20 @@ def render_sidebar() -> config.AppSettings:
             help="Single-model narrative. Requires an API key in .env; falls back to heuristics automatically.",
         )
 
+        st.markdown("#### 𝕏 Mindshare (Grok)")
+        x_reason = mindshare.GrokMindshareClient().unavailable_reason()
+        st.caption(("✅ Grok X search ready" if not x_reason else f"⚪ {x_reason}"))
+        use_x_search = st.toggle(
+            "Query X via Grok",
+            value=False,
+            disabled=bool(x_reason),
+            help=(
+                "Searches X for live discussion of the token and blends real mindshare "
+                "into the momentum score. Billed per search, so results are cached."
+                if not x_reason else x_reason
+            ),
+        )
+
         st.markdown("#### 🤖 Multi-LLM ensemble")
         statuses = llm_analyzers.provider_statuses()
         ready_providers = [s_.provider for s_ in statuses if s_.ready]
@@ -221,6 +237,7 @@ def render_sidebar() -> config.AppSettings:
         if st.button("🔄 Refresh data (clear caches)", use_container_width=True):
             st.cache_data.clear()
             data_fetchers.clear_caches()
+            mindshare.clear_cache()
             st.session_state["cache_nonce"] += 1
             st.toast("Caches cleared — next request hits the APIs live.")
 
@@ -235,6 +252,7 @@ def render_sidebar() -> config.AppSettings:
         risk_profile=risk_profile,
         weights=weights,
         use_llm=use_llm,
+        use_x_search=bool(use_x_search),
         use_ensemble=bool(use_ensemble and selected_providers),
         ensemble_providers=selected_providers,
         blend_weight=blend_weight,
@@ -263,6 +281,8 @@ def render_result(result: AnalysisResult, settings: config.AppSettings) -> None:
     st.markdown("")
     ui.render_profile(result.profile)
     ui.render_narrative(result)
+    st.markdown("")
+    ui.render_mindshare(result.mindshare)
     st.markdown("")
     if result.ensemble is not None:
         ui.render_ensemble(result.ensemble, result.scorecard)
@@ -297,6 +317,8 @@ def run_analysis(addresses: List[str], settings: config.AppSettings) -> None:
         return
     label = addresses[0] if len(addresses) == 1 else f"{len(addresses)} tokens"
     spinner = f"Fetching market data, running security checks and scoring {label}…"
+    if settings.use_x_search:
+        spinner = f"Analyzing {label} and searching X via Grok…"
     if settings.use_ensemble:
         spinner = (
             f"Analyzing {label} and querying "
@@ -306,7 +328,7 @@ def run_analysis(addresses: List[str], settings: config.AppSettings) -> None:
         args = (
             settings.chain, settings.portfolio_usd, settings.risk_profile, settings.use_llm,
             settings.use_ensemble, tuple(settings.ensemble_providers), settings.blend_weight,
-            st.session_state["cache_nonce"],
+            settings.use_x_search, st.session_state["cache_nonce"],
         )
         if len(addresses) == 1:
             results = [cached_analyze(addresses[0], *args)]

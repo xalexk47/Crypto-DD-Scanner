@@ -191,6 +191,26 @@ ENSEMBLE_PROVIDERS = tuple(
     if p.strip()
 )
 
+# --- X / Twitter mindshare via Grok live search ----------------------------
+# Grok is the only major model with first-party access to X, which is where
+# meme-coin mindshare actually forms. xAI retired the old `search_parameters`
+# Live Search API on 2026-01-12 (410 Gone); the current mechanism is the
+# server-side Agent Tools API, i.e. a tool entry in the `tools` array.
+#
+# These are configurable because the exact model id and parameter casing move
+# faster than this app does -- run `python scripts/check_grok.py` to see what
+# your account actually supports, then set these accordingly.
+X_SEARCH_ENABLED = os.getenv("MEMEDD_X_SEARCH", "1").strip().lower() not in ("0", "false", "no")
+X_SEARCH_MODEL = os.getenv("MEMEDD_X_SEARCH_MODEL", "grok-4.1-fast")
+X_SEARCH_TOOL_TYPE = os.getenv("MEMEDD_X_SEARCH_TOOL", "x_search")
+# How far back to search, and how many posts to keep as evidence.
+X_SEARCH_WINDOW_HOURS = int(os.getenv("MEMEDD_X_SEARCH_WINDOW_HOURS", "48"))
+X_SEARCH_MAX_POSTS = int(os.getenv("MEMEDD_X_SEARCH_MAX_POSTS", "6"))
+# Live searches are billed per call, so cache them harder than market data.
+CACHE_TTL_MINDSHARE = int(os.getenv("MEMEDD_CACHE_TTL_MINDSHARE", "900"))
+# Share of the momentum pillar given to social mindshare when it is available.
+MINDSHARE_WEIGHT_IN_MOMENTUM = float(os.getenv("MEMEDD_MINDSHARE_WEIGHT", "0.3"))
+
 LLM_TIMEOUT_SECONDS = float(os.getenv("MEMEDD_LLM_TIMEOUT", "75"))
 LLM_MAX_TOKENS = int(os.getenv("MEMEDD_LLM_MAX_TOKENS", "16000"))
 # Low temperature: we want reproducible scoring, not creative writing.
@@ -341,6 +361,8 @@ class AppSettings:
     use_llm: bool = False
     # Multi-model ensemble (Grok + Claude + GPT in parallel).
     use_ensemble: bool = False
+    # Query X/Twitter through Grok for real social mindshare.
+    use_x_search: bool = False
     # default_factory, not a bare default: a plain default would bind the
     # module value at import time and then ignore any later change to it,
     # which silently freezes whatever the developer's .env said at startup.

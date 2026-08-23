@@ -149,6 +149,56 @@ def to_markdown(result: AnalysisResult) -> str:
             add(f"- {link.label or link.kind.title()}: {link.url}")
         add("")
 
+    # --- X mindshare -------------------------------------------------------
+    mindshare = result.mindshare
+    if mindshare is not None and mindshare.available:
+        add("## X / Twitter mindshare (Grok)")
+        add("")
+        if mindshare.is_live:
+            add("**Source: live X search.**")
+        else:
+            add("**Source: model knowledge — NOT a live search. Do not read as current sentiment.**")
+        add("")
+        add(f"- Sentiment: **{mindshare.sentiment}** ({mindshare.sentiment_score:+.2f})")
+        add(f"- Attention: **{mindshare.mindshare_score:.0f}/100**")
+        add(f"- Post volume: **{mindshare.post_volume}**, trend **{mindshare.trend}**")
+        organic = {True: "organic", False: "coordinated / bots", None: "unclear"}[mindshare.is_organic]
+        add(f"- Discussion reads as: **{organic}**")
+        add("")
+        if mindshare.summary:
+            add(f"> {mindshare.summary}")
+            add("")
+        if mindshare.themes:
+            add(f"**Themes:** {', '.join(mindshare.themes)}")
+            add("")
+        if mindshare.notable_accounts:
+            add(f"**Notable accounts:** {', '.join('@' + h for h in mindshare.notable_accounts)}")
+            add("")
+        if mindshare.red_flags:
+            add("**Red flags**")
+            add("")
+            for flag in mindshare.red_flags:
+                add(f"- 🚩 {flag}")
+            add("")
+        if mindshare.sample_posts:
+            add("**Sample posts**")
+            add("")
+            for post in mindshare.sample_posts:
+                meta = f" ({post.engagement:,} engagements)" if post.engagement else ""
+                link = f" — {post.url}" if post.url else ""
+                add(f"- **@{post.handle or 'unknown'}**{meta}: {post.text}{link}")
+            add("")
+            add("_Posts are as reported by the model; spot-check before acting on them._")
+            add("")
+        for warning in mindshare.warnings:
+            add(f"> {warning}")
+            add("")
+    elif mindshare is not None and mindshare.error:
+        add("## X / Twitter mindshare")
+        add("")
+        add(f"Unavailable: {mindshare.error}")
+        add("")
+
     # --- multi-LLM ensemble ----------------------------------------------
     ensemble = result.ensemble
     if ensemble is not None and ensemble.ok and ensemble.consensus is not None:

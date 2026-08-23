@@ -23,6 +23,9 @@ DexScreener URLs work too) and get, per token:
   **top-10 holder concentration excluding LP and burn wallets**.
 - **Lore & narrative** — a readable narrative summary with themes, bull case and
   bear case. Heuristic by default; swap in Claude/GPT/Grok with one env var.
+- **X / Twitter mindshare** *(optional)* — Grok searches X live for discussion of
+  the token and returns sentiment, post volume, notable accounts and real sample
+  posts, which feed the momentum score. See below.
 - **Multi-LLM ensemble** *(optional)* — the same payload sent to Grok, Claude and
   GPT **in parallel**, each returning strict JSON, combined into a consensus
   verdict with an explicit agreement score and dissent notes. See below.
@@ -101,6 +104,74 @@ Position sizing is not a fixed percentage — it is derived, in this order:
 | Degen | 3.50% | 15% | 50% | 3.00% |
 
 ---
+
+---
+
+## X / Twitter mindshare (Grok)
+
+Optional, off by default, needs `XAI_API_KEY`. Toggle **Query X via Grok** in the
+sidebar.
+
+Every other signal in this app is on-chain or market data. Meme-coin mindshare is
+neither — it forms on X, often hours before it reaches volume. Grok is the only
+major model with first-party X access, which is what earns it a place here beyond
+being a third ensemble opinion.
+
+**Verify your setup first:**
+
+```bash
+python scripts/check_grok.py
+```
+
+That checks your key, lists the model ids your account can actually call, and
+tries the X search tool — printing the exact fix for whatever fails.
+
+### What it returns
+
+Sentiment and a −1..+1 score, an attention rating out of 100, post volume
+(`none`→`viral`), trend, whether the discussion looks **organic or coordinated**,
+recurring themes, notable accounts, real sample posts with engagement, and red
+flags (impersonation, giveaway scams, reply-spam).
+
+### How it changes the score
+
+It replaces part of the momentum pillar — until now that pillar used volume and
+price as a *proxy* for attention. Default 30% social / 70% on-chain
+(`MEMEDD_MINDSHARE_WEIGHT`). Three judgement calls are baked in:
+
+- **Coordinated shilling lowers the score.** High volume plus bullish tone
+  *reduces* momentum when `is_organic` is false — a naive implementation would
+  reward exactly the pattern you want to avoid.
+- **Attention isn't approval.** A hated token people are arguing about still has
+  more mindshare than one nobody mentions; sentiment tilts the score rather than
+  setting it.
+- **Live and stale are never blended.** If the search tool is unavailable the app
+  falls back to a plain Grok call, labels it `is_live=false`, pulls its influence
+  toward neutral, and says so in the UI and the report. A model's recollection of
+  a ticker is not what X is saying today.
+
+Grok's findings are also injected into the ensemble payload, so Claude and GPT
+reason about the social data too rather than Grok alone having seen it.
+
+### A note on the API
+
+xAI **retired** the original Live Search API (`search_parameters`) on
+2026-01-12 — it returns 410 Gone. This app uses the current server-side Agent
+Tools API (`{"type": "x_search"}` in the `tools` array) over the ordinary
+OpenAI-compatible endpoint. The call degrades through a chain:
+
+| Attempt | Result |
+| --- | --- |
+| `x_search` + strict JSON schema | live data, structured |
+| `x_search`, no schema | live data, JSON repaired on parse |
+| no tools | model knowledge, clearly labelled not-live |
+| all failed | unavailable, with the error and a pointer to `check_grok.py` |
+
+The model id and tool name are env vars (`MEMEDD_X_SEARCH_MODEL`,
+`MEMEDD_X_SEARCH_TOOL`), so if xAI changes either you can fix it in `.env`
+without touching code.
+
+Searches are billed per call, so results are cached for 15 minutes by default.
 
 ---
 
@@ -322,11 +393,13 @@ src/
   analyzer.py           Orchestration: analyze_token / analyze_many / scan
   llm.py                Narrative layer (single model, prose output)
   llm_analyzers.py      Multi-LLM ensemble: strict JSON, parallel, consensus
+  mindshare.py          X/Twitter mindshare via Grok's server-side search
   history.py            Local SQLite history
   report.py             Markdown / JSON export
   ui.py                 Reusable Streamlit components + CSS
   utils.py              Formatting, address parsing, safe coercion, TTL cache
-tests/                  173 unit + end-to-end tests (network and LLMs stubbed)
+  scripts/check_grok.py Diagnose your Grok key, models and X search access
+tests/                  222 unit + end-to-end tests (network and LLMs stubbed)
 .streamlit/config.toml  Dark theme
 ```
 
@@ -409,8 +482,8 @@ Verify contracts by hand before trading on it.
 
 ## Roadmap
 
-- Let Grok use its live X access explicitly for a mindshare sub-score
 - Per-model cost/latency tracking and a cheap-model tier for scanning
+- Mindshare history, to score attention *trend* rather than a point reading
 - Wallet/bundle clustering to catch sybil "holder counts"
 - Historical score tracking and alerting on score changes
 - Backtesting the scoring model against realised returns

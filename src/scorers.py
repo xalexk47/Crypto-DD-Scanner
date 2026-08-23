@@ -30,6 +30,7 @@ from typing import List, Optional, Tuple
 from . import config
 from .models import (
     ComponentScore,
+    MindshareReport,
     NarrativeReport,
     RiskPlan,
     ScoreCard,
@@ -309,11 +310,15 @@ def score_holders(security: Optional[SecurityReport], snapshot: Optional[TokenSn
 # ==========================================================================
 # Pillar 4 - Mindshare / momentum (15%)
 # ==========================================================================
-def score_momentum(snapshot: TokenSnapshot) -> ComponentScore:
-    """Volume + price action + trade flow as a proxy for attention.
+def score_momentum(
+    snapshot: TokenSnapshot,
+    mindshare: Optional[MindshareReport] = None,
+) -> ComponentScore:
+    """On-chain momentum, blended with real social mindshare when available.
 
-    Placeholder for the real thing: once an LLM/social layer is wired in
-    (see ``src/llm.py``), blend actual social mindshare in here.
+    Volume and price action are a *proxy* for attention. When Grok has actually
+    searched X (``mindshare.is_live``), the real signal replaces part of the
+    proxy -- see :data:`src.config.MINDSHARE_WEIGHT_IN_MOMENTUM`.
     """
     reasons: List[str] = []
     weight = config.DEFAULT_WEIGHTS.momentum
@@ -373,9 +378,31 @@ def score_momentum(snapshot: TokenSnapshot) -> ComponentScore:
             score = max(0.0, score - 6)
             reasons.append(f"Volume decaying ({accel:.1f}x the 24h run-rate in the last 6h).")
 
+    # --- (e) real social mindshare, when Grok could see X -----------------
+    confidence = 0.8
+    from .mindshare import score_from_report      # local import avoids a cycle
+
+    social = score_from_report(mindshare)
+    if social is not None and mindshare is not None:
+        chain_weight = 1.0 - clamp(config.MINDSHARE_WEIGHT_IN_MOMENTUM, 0.0, 1.0)
+        score = score * chain_weight + social * (1.0 - chain_weight)
+        source = "live X search" if mindshare.is_live else "model knowledge, not live"
+        reasons.append(
+            f"X mindshare {social:.0f}/100 ({mindshare.sentiment}, {mindshare.post_volume} volume, "
+            f"{source}) blended at {(1 - chain_weight) * 100:.0f}%."
+        )
+        if mindshare.is_organic is False:
+            reasons.append("Discussion reads as coordinated shilling, not organic interest — discounted.")
+        for flag in mindshare.red_flags[:2]:
+            reasons.append(f"X red flag: {flag}")
+        # Live social data raises confidence; stale model knowledge lowers it.
+        confidence = 0.9 if mindshare.is_live else 0.7
+    elif mindshare is not None and mindshare.error:
+        reasons.append(f"X mindshare unavailable ({mindshare.error[:80]}); using on-chain proxies only.")
+
     return ComponentScore(
         key="momentum", label=config.COMPONENT_LABELS["momentum"], score=clamp(score),
-        weight=weight, reasons=reasons, confidence=0.8,
+        weight=weight, reasons=reasons, confidence=confidence,
     )
 
 
@@ -538,6 +565,7 @@ def build_scorecard(
     security: Optional[SecurityReport] = None,
     narrative: Optional[NarrativeReport] = None,
     weights: Optional[config.ScoreWeights] = None,
+    mindshare: Optional[MindshareReport] = None,
 ) -> ScoreCard:
     """Run every pillar and combine into a composite score + decision."""
     weights = weights or config.DEFAULT_WEIGHTS
@@ -548,7 +576,7 @@ def build_scorecard(
         score_security(security),
         score_liquidity(snapshot, security),
         score_holders(security, snapshot),
-        score_momentum(snapshot),
+        score_momentum(snapshot, mindshare),
         score_narrative(snapshot, narrative),
         score_catalyst(snapshot, security),
     ]
@@ -581,6 +609,15 @@ def build_scorecard(
         risks.append("Pair is under 24 hours old - the majority of rugs happen in this window.")
     if not snapshot.has_socials:
         risks.append("No socials listed - no community channel to sustain a narrative.")
+    if mindshare is not None and mindshare.available and mindshare.is_live:
+        if mindshare.is_organic is False:
+            risks.append("X discussion looks coordinated rather than organic.")
+        elif mindshare.post_volume in ("high", "viral") and mindshare.sentiment == "bullish":
+            positives.append(f"Live X attention is {mindshare.post_volume} and bullish.")
+        elif mindshare.post_volume in ("none", "low"):
+            risks.append("Almost no one is talking about this on X right now.")
+        for flag in mindshare.red_flags:
+            risks.append(f"X: {flag}")
 
     # Hard veto: certain security findings make the score irrelevant.
     vetoed = False

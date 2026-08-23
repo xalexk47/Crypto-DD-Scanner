@@ -358,6 +358,69 @@ class NarrativeReport:
 
 
 # --------------------------------------------------------------------------
+# X / Twitter mindshare (Grok live search)
+# --------------------------------------------------------------------------
+@dataclass
+class XPost:
+    """One X post surfaced by Grok's search, kept for evidence."""
+
+    handle: str = ""
+    text: str = ""
+    url: str = ""
+    engagement: Optional[int] = None      # likes+reposts, when the model reports it
+    posted_at: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class MindshareReport:
+    """What X is actually saying about a token, via Grok.
+
+    ``is_live`` is the field that matters: True means Grok really searched X,
+    False means the answer came from model knowledge only and must not be
+    treated as current. The two are never blended silently.
+    """
+
+    query: str = ""
+    available: bool = False
+    is_live: bool = False
+    source: str = "unavailable"      # x_search | model_knowledge | unavailable
+    model: str = ""
+    error: str = ""
+    latency_ms: int = 0
+
+    sentiment: str = "unknown"       # bullish | mixed | bearish | quiet | unknown
+    sentiment_score: float = 0.0     # -1.0 (bearish) .. +1.0 (bullish)
+    mindshare_score: float = 0.0     # 0-100, the model's own attention rating
+    post_volume: str = "unknown"     # none | low | moderate | high | viral
+    trend: str = "unknown"           # accelerating | steady | fading | unknown
+    is_organic: Optional[bool] = None    # False when it reads as bot/paid shilling
+
+    summary: str = ""
+    themes: List[str] = field(default_factory=list)
+    notable_accounts: List[str] = field(default_factory=list)
+    sample_posts: List[XPost] = field(default_factory=list)
+    red_flags: List[str] = field(default_factory=list)
+    citations: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+    @property
+    def headline(self) -> str:
+        if not self.available:
+            return "No X data"
+        live = "live X search" if self.is_live else "model knowledge (not live)"
+        return f"{self.sentiment.title()} · {self.post_volume} volume · {live}"
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["sample_posts"] = [p.to_dict() for p in self.sample_posts]
+        data["headline"] = self.headline
+        return data
+
+
+# --------------------------------------------------------------------------
 # Multi-LLM ensemble
 # --------------------------------------------------------------------------
 @dataclass
@@ -506,6 +569,7 @@ class AnalysisResult:
     narrative: Optional[NarrativeReport] = None
     ensemble: Optional[EnsembleResult] = None
     profile: Optional[TokenProfile] = None
+    mindshare: Optional[MindshareReport] = None
     data_warnings: List[str] = field(default_factory=list)
     analyzed_at: str = ""
 
@@ -538,6 +602,7 @@ class AnalysisResult:
             "narrative": self.narrative.to_dict() if self.narrative else None,
             "ensemble": self.ensemble.to_dict() if self.ensemble else None,
             "profile": self.profile.to_dict() if self.profile else None,
+            "mindshare": self.mindshare.to_dict() if self.mindshare else None,
         }
 
 

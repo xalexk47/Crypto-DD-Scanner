@@ -47,6 +47,7 @@ from .models import (
     ConsensusVerdict,
     EnsembleResult,
     LLMVerdict,
+    MindshareReport,
     ScoreCard,
     SecurityReport,
     TokenProfile,
@@ -169,6 +170,7 @@ def build_analysis_payload(
     security: Optional[SecurityReport] = None,
     scorecard: Optional[ScoreCard] = None,
     profile: Optional[TokenProfile] = None,
+    mindshare: Optional[MindshareReport] = None,
 ) -> Dict[str, Any]:
     """Assemble the full structured token payload sent to every model.
 
@@ -222,6 +224,7 @@ def build_analysis_payload(
         "security": None,
         "platform_deterministic_score": None,
         "dexscreener_profile": None,
+        "x_mindshare": None,
     }
 
     if security is not None and security.available:
@@ -266,6 +269,33 @@ def build_analysis_payload(
             "veto_reason": scorecard.veto_reason or None,
             "pillars": {c.key: round(c.score, 1) for c in scorecard.components},
         }
+
+    if mindshare is not None and mindshare.available:
+        # Sharing Grok's X findings with every model means Claude and GPT can
+        # weigh the social signal too, instead of Grok alone having seen it.
+        payload["x_mindshare"] = {
+            "data_is_live": mindshare.is_live,
+            "source": mindshare.source,
+            "sentiment": mindshare.sentiment,
+            "sentiment_score": mindshare.sentiment_score,
+            "attention_score_0_100": mindshare.mindshare_score,
+            "post_volume": mindshare.post_volume,
+            "trend": mindshare.trend,
+            "looks_organic": mindshare.is_organic,
+            "summary": mindshare.summary or None,
+            "themes": mindshare.themes or None,
+            "notable_accounts": mindshare.notable_accounts or None,
+            "red_flags": mindshare.red_flags or None,
+            "sample_posts": [
+                {"handle": p.handle, "text": p.text, "engagement": p.engagement}
+                for p in mindshare.sample_posts
+            ] or None,
+        }
+        if not mindshare.is_live:
+            payload["x_mindshare"]["caveat"] = (
+                "This came from model knowledge, not a live X search. Treat it as "
+                "background, not current sentiment."
+            )
 
     if profile is not None and profile.has_content:
         payload["dexscreener_profile"] = {
@@ -970,6 +1000,7 @@ def run_ensemble(
     security: Optional[SecurityReport] = None,
     scorecard: Optional[ScoreCard] = None,
     profile: Optional[TokenProfile] = None,
+    mindshare: Optional[MindshareReport] = None,
     providers: Optional[Sequence[str]] = None,
     clients: Optional[Dict[str, Any]] = None,
     blend_weight: float = config.ENSEMBLE_BLEND_WEIGHT,
@@ -998,7 +1029,7 @@ def run_ensemble(
         result.elapsed_ms = int((time.monotonic() - started) * 1000)
         return result
 
-    payload = build_analysis_payload(snapshot, security, scorecard, profile)
+    payload = build_analysis_payload(snapshot, security, scorecard, profile, mindshare)
     wall_clock = timeout if timeout is not None else config.LLM_TIMEOUT_SECONDS + 15
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(analyzers))
