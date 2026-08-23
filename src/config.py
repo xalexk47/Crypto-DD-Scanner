@@ -17,9 +17,22 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 try:  # python-dotenv is optional at runtime
-    from dotenv import load_dotenv
+    import io
 
-    load_dotenv()
+    from dotenv import find_dotenv, load_dotenv
+
+    # Read .env ourselves in universal-newline mode before handing it to
+    # python-dotenv. A .env saved by a GUI editor (TextEdit on macOS, Notepad
+    # on Windows) can carry classic-Mac CR or Windows CRLF line endings, which
+    # the parser reads as one giant line -- every setting silently vanishes and
+    # the app behaves as though no keys were configured at all. Python's text
+    # mode normalises all three conventions to "\n".
+    _dotenv_path = find_dotenv(usecwd=True)
+    if _dotenv_path:
+        with open(_dotenv_path, "r", encoding="utf-8", errors="replace") as _fh:
+            load_dotenv(stream=io.StringIO(_fh.read()))
+    else:
+        load_dotenv()
 except Exception:  # pragma: no cover - dotenv missing is not fatal
     pass
 

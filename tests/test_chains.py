@@ -108,3 +108,40 @@ class TestRobinhoodChain:
         note = config.SECURITY_PROVIDER_NOTES["robinhood"]
         assert "GoPlus does not support" in note
         assert "Verify contracts manually" in note
+
+
+class TestDotenvLineEndings:
+    """A .env saved by a GUI editor must still parse.
+
+    TextEdit on macOS can write classic-Mac CR line endings; python-dotenv then
+    reads the whole file as one line and every setting silently disappears,
+    which looks exactly like "no API key configured".
+    """
+
+    @pytest.mark.parametrize(
+        "newline,label",
+        [("\n", "unix LF"), ("\r", "classic-Mac CR"), ("\r\n", "Windows CRLF")],
+    )
+    def test_every_line_ending_convention_parses(self, tmp_path, monkeypatch, newline, label):
+        import importlib
+        import sys
+
+        env_file = tmp_path / ".env"
+        env_file.write_bytes(
+            newline.join(["# comment", "MEMEDD_LLM_PROVIDER=xai", "XAI_API_KEY=xai-test-123"]).encode()
+            + newline.encode()
+        )
+        monkeypatch.chdir(tmp_path)
+        # Clear anything the outer environment already set for these names.
+        monkeypatch.delenv("XAI_API_KEY", raising=False)
+        monkeypatch.delenv("MEMEDD_LLM_PROVIDER", raising=False)
+
+        sys.modules.pop("src.config", None)
+        reloaded = importlib.import_module("src.config")
+
+        assert reloaded.XAI_API_KEY == "xai-test-123", label
+        assert reloaded.LLM_PROVIDER == "xai", label
+
+        # Leave the real module in place for the rest of the suite.
+        sys.modules.pop("src.config", None)
+        importlib.import_module("src.config")
