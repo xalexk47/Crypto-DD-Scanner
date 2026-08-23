@@ -14,6 +14,7 @@ step gets that far.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -129,31 +130,43 @@ def main() -> int:
             print(line)
         return 1
 
-    # 5. the server-side X search tool ------------------------------------
-    print(f"\n5. X search tool ('{config.X_SEARCH_TOOL_TYPE}' on {config.X_SEARCH_MODEL})")
+    # 5. the live search tool ---------------------------------------------
+    print(f"\n5. Live Search tool ('{config.X_SEARCH_TOOL_TYPE}' on {config.X_SEARCH_MODEL})")
+    print(f"{INFO} Trying each documented payload shape until one is accepted.")
     grok = GrokMindshareClient()
-    tool = grok._x_search_tool(config.X_SEARCH_WINDOW_HOURS)
-    try:
-        response = client.chat.completions.create(
-            model=config.X_SEARCH_MODEL,
-            messages=[
-                {"role": "system", "content": MINDSHARE_SYSTEM_PROMPT},
-                {"role": "user", "content": "Search X for posts about $BRETT on Base in the last 24 hours."},
-            ],
-            tools=[tool],
-            max_tokens=800,
-        )
-        text = (response.choices[0].message.content or "").strip()
-        print(f"{OK} Tool accepted. First 200 chars of the answer:")
-        print(f"     {text[:200]}")
-    except Exception as exc:
-        print(f"{BAD} {type(exc).__name__}: {exc}")
-        for line in explain(exc):
-            print(line)
-        print(f"{INFO} The app falls back to a non-live answer, clearly labelled.")
-        print(f"{INFO} If the tool name or model is wrong, set MEMEDD_X_SEARCH_TOOL /")
-        print(f"{INFO} MEMEDD_X_SEARCH_MODEL in .env — no code change needed.")
-        print(f"{INFO} Paste this error back to Claude and it can correct the shape.")
+    variants = grok.search_tool_variants(config.X_SEARCH_WINDOW_HOURS)
+    accepted = None
+    for index, tool in enumerate(variants, start=1):
+        shape = json.dumps(tool)
+        label = shape if len(shape) <= 88 else shape[:85] + "..."
+        try:
+            response = client.chat.completions.create(
+                model=config.X_SEARCH_MODEL,
+                messages=[
+                    {"role": "system", "content": MINDSHARE_SYSTEM_PROMPT},
+                    {"role": "user", "content": "Search X for posts about $BRETT on Base in the last 24 hours."},
+                ],
+                tools=[tool],
+                max_tokens=800,
+            )
+            text = (response.choices[0].message.content or "").strip()
+            print(f"{OK} shape {index} ACCEPTED: {label}")
+            print(f"{INFO} Answer began: {text[:160]}")
+            accepted = tool
+            break
+        except Exception as exc:
+            reason = str(exc)
+            # Keep the useful part of xAI's deserialization complaints.
+            if "unknown variant" in reason or "unknown field" in reason or "missing field" in reason:
+                reason = reason.split("Failed to deserialize the JSON body into the target type:")[-1].strip()
+            print(f"{BAD} shape {index} rejected: {label}")
+            print(f"     {reason[:220]}")
+
+    if accepted is None:
+        print(f"{BAD} No Live Search payload shape was accepted.")
+        print(f"{INFO} The app still works — it falls back to a clearly labelled non-live answer.")
+        print(f"{INFO} Paste this whole section back to Claude; the error text above names")
+        print(f"{INFO}   the fields the API does expect, which is enough to fix it.")
         return 2
 
     # 6. the real thing ---------------------------------------------------

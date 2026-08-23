@@ -155,21 +155,29 @@ reason about the social data too rather than Grok alone having seen it.
 
 ### A note on the API
 
-xAI **retired** the original Live Search API (`search_parameters`) on
-2026-01-12 — it returns 410 Gone. This app uses the current server-side Agent
-Tools API (`{"type": "x_search"}` in the `tools` array) over the ordinary
-OpenAI-compatible endpoint. The call degrades through a chain:
+Verified against the live API: `/v1/chat/completions` accepts tools of type
+`function` or **`live_search`**. The `x_search` tool people find in xAI's docs
+belongs to the separate **Responses API** (`/v1/responses`) and is rejected here
+with a 422 — an easy and expensive thing to get wrong.
+
+Because xAI's schema moves, the app does not bet on one payload shape. It tries
+several documented Live Search shapes (richest first, minimal last) and keeps
+the first the API accepts; a rejected shape fails at request deserialization,
+before any model runs, so a miss costs no tokens. The call then degrades through
+a chain:
 
 | Attempt | Result |
 | --- | --- |
-| `x_search` + strict JSON schema | live data, structured |
-| `x_search`, no schema | live data, JSON repaired on parse |
+| `live_search` (each shape) + strict JSON schema | live data, structured |
+| `live_search` (each shape), no schema | live data, JSON repaired on parse |
 | no tools | model knowledge, clearly labelled not-live |
 | all failed | unavailable, with the error and a pointer to `check_grok.py` |
 
-The model id and tool name are env vars (`MEMEDD_X_SEARCH_MODEL`,
-`MEMEDD_X_SEARCH_TOOL`), so if xAI changes either you can fix it in `.env`
-without touching code.
+The model id, tool name and sources are env vars (`MEMEDD_X_SEARCH_MODEL`,
+`MEMEDD_X_SEARCH_TOOL`, `MEMEDD_X_SEARCH_SOURCES`), so if xAI changes any of
+them you can fix it in `.env` without touching code. Model ids move fast —
+`grok-4.6` at time of writing; run `scripts/check_grok.py` to list what your own
+account can call.
 
 Searches are billed per call, so results are cached for 15 minutes by default.
 

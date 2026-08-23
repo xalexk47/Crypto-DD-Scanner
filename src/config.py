@@ -189,7 +189,7 @@ LLM_MODEL = os.getenv("MEMEDD_LLM_MODEL", "")
 # frontier model for judgement plus a cheaper one for a second opinion.
 ANTHROPIC_MODEL = os.getenv("MEMEDD_ANTHROPIC_MODEL", "claude-opus-5")
 OPENAI_MODEL = os.getenv("MEMEDD_OPENAI_MODEL", "gpt-4.1")
-XAI_MODEL = os.getenv("MEMEDD_XAI_MODEL", "grok-4")
+XAI_MODEL = os.getenv("MEMEDD_XAI_MODEL", "grok-4.6")
 
 # xAI speaks the OpenAI wire protocol, so the OpenAI SDK drives it with a
 # different base URL.
@@ -214,8 +214,17 @@ ENSEMBLE_PROVIDERS = tuple(
 # faster than this app does -- run `python scripts/check_grok.py` to see what
 # your account actually supports, then set these accordingly.
 X_SEARCH_ENABLED = os.getenv("MEMEDD_X_SEARCH", "1").strip().lower() not in ("0", "false", "no")
-X_SEARCH_MODEL = os.getenv("MEMEDD_X_SEARCH_MODEL", "grok-4.1-fast")
-X_SEARCH_TOOL_TYPE = os.getenv("MEMEDD_X_SEARCH_TOOL", "x_search")
+X_SEARCH_MODEL = os.getenv("MEMEDD_X_SEARCH_MODEL", "grok-4.6")
+# Confirmed against the live API: /v1/chat/completions accepts tools of type
+# "function" or "live_search". The "x_search" tool belongs to xAI's separate
+# Responses API (/v1/responses) and is rejected here with a 422.
+X_SEARCH_TOOL_TYPE = os.getenv("MEMEDD_X_SEARCH_TOOL", "live_search")
+# Restrict Live Search to X only; "web" is available but dilutes a mindshare
+# reading with news articles and blog spam.
+X_SEARCH_SOURCES = tuple(
+    s.strip() for s in os.getenv("MEMEDD_X_SEARCH_SOURCES", "x").split(",") if s.strip()
+)
+X_SEARCH_MAX_RESULTS = int(os.getenv("MEMEDD_X_SEARCH_MAX_RESULTS", "20"))
 # How far back to search, and how many posts to keep as evidence.
 X_SEARCH_WINDOW_HOURS = int(os.getenv("MEMEDD_X_SEARCH_WINDOW_HOURS", "48"))
 X_SEARCH_MAX_POSTS = int(os.getenv("MEMEDD_X_SEARCH_MAX_POSTS", "6"))

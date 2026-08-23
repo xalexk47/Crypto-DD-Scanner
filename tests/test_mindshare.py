@@ -203,26 +203,58 @@ class TestMomentumIntegration:
 
 
 class TestGrokClient:
-    def test_fetches_and_parses_via_the_x_search_tool(self, snapshot):
+    def test_fetches_and_parses_via_the_live_search_tool(self, snapshot):
         client = FakeOpenAIClient(content=payload_json())
         report = ms.GrokMindshareClient(api_key="k", client=client).fetch(snapshot)
 
         assert report.available and report.is_live
         sent = client.calls[0]
-        assert sent["tools"][0]["type"] == config.X_SEARCH_TOOL_TYPE
         assert sent["model"] == config.X_SEARCH_MODEL
-        assert "fromDate" in sent["tools"][0] and "from_date" in sent["tools"][0]
+        assert sent["tools"][0]["type"] == config.X_SEARCH_TOOL_TYPE
+
+    def test_tool_type_is_live_search_not_x_search(self):
+        """/v1/chat/completions accepts `function` or `live_search`.
+
+        `x_search` belongs to xAI's separate Responses API and is rejected here
+        with a 422 -- confirmed against the live endpoint.
+        """
+        assert config.X_SEARCH_TOOL_TYPE == "live_search"
+        for variant in ms.GrokMindshareClient(api_key="k").search_tool_variants(48):
+            assert variant["type"] == "live_search"
+
+    def test_variants_run_richest_to_minimal(self):
+        variants = ms.GrokMindshareClient(api_key="k").search_tool_variants(48)
+
+        assert len(variants) >= 2
+        # The last shape must always parse: type only, no extra fields.
+        assert variants[-1] == {"type": "live_search"}
+        # Earlier shapes carry the search window and source restriction.
+        first = json.dumps(variants[0])
+        assert "from_date" in first and "to_date" in first and "sources" in first
 
     def test_falls_back_to_non_live_and_labels_it(self, snapshot):
-        # First two attempts (both carrying tools) fail; the third has no tools.
-        client = FakeOpenAIClient(content=payload_json(), fail_modes=2)
+        """When every tool shape is rejected, the answer must not claim to be live."""
+        variants = ms.GrokMindshareClient(api_key="k").search_tool_variants(48)
+        tool_attempts = len(variants) * 2      # each shape, with and without the schema
+
+        client = FakeOpenAIClient(content=payload_json(), fail_modes=tool_attempts)
         report = ms.GrokMindshareClient(api_key="k", client=client).fetch(snapshot)
 
         assert report.available is True
         assert report.is_live is False               # must not claim live data
         assert report.source == "model_knowledge"
-        assert "tools" not in client.calls[2]
+        # Every tool-bearing attempt was tried before giving up on live data.
+        assert all("tools" in call for call in client.calls[:tool_attempts])
+        assert "tools" not in client.calls[tool_attempts]
         assert any("not current activity" in w for w in report.warnings)
+
+    def test_a_rejected_shape_moves_on_to_the_next(self, snapshot):
+        """One bad shape must not sink the feature - the next shape is tried."""
+        client = FakeOpenAIClient(content=payload_json(), fail_modes=1)
+        report = ms.GrokMindshareClient(api_key="k", client=client).fetch(snapshot)
+
+        assert report.is_live is True                # still live, via shape 2
+        assert len(client.calls) == 2
 
     def test_total_failure_returns_an_actionable_error(self, snapshot):
         client = FakeOpenAIClient(error=RuntimeError("410 Gone"))
@@ -244,10 +276,13 @@ class TestGrokClient:
         monkeypatch.setattr(config, "XAI_API_KEY", "k")
         assert "disabled" in ms.GrokMindshareClient().unavailable_reason()
 
-    def test_search_window_becomes_a_date_range(self):
-        tool = ms.GrokMindshareClient(api_key="k")._x_search_tool(48)
-        assert len(tool["fromDate"]) == 10 and tool["fromDate"].count("-") == 2
-        assert tool["fromDate"] <= tool["toDate"]
+    def test_search_window_becomes_an_iso_date_range(self):
+        richest = ms.GrokMindshareClient(api_key="k").search_tool_variants(48)[0]
+        params = richest["live_search"]
+
+        assert len(params["from_date"]) == 10 and params["from_date"].count("-") == 2
+        assert params["from_date"] <= params["to_date"]
+        assert params["sources"] == [{"type": "x"}]
 
 
 class TestEnsembleHandoff:

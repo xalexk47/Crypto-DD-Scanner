@@ -345,24 +345,45 @@ class GrokMindshareClient:
         return OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=self.timeout)
 
     # -- the tool definition --------------------------------------------
-    def _x_search_tool(self, window_hours: int) -> Dict[str, Any]:
-        """Server-side X search tool entry.
+    def search_tool_variants(self, window_hours: int) -> List[Dict[str, Any]]:
+        """Candidate Live Search tool payloads, richest first.
 
-        Dates are sent as plain ``YYYY-MM-DD``. Both camelCase and snake_case
-        spellings of the window are included because xAI's docs and SDK have
-        used both, and an endpoint that ignores an unknown key costs us nothing
-        while a missing one silently widens the search window.
+        xAI's chat-completions endpoint validates the tools array strictly and
+        rejects unknown fields outright, but its rejection messages enumerate
+        what it *does* accept -- so trying a short list of documented shapes and
+        keeping the first that is accepted is more reliable than betting the
+        feature on one guess. A rejected shape fails during request
+        deserialization, before any model runs, so a miss costs no tokens.
+
+        Order matters: the first two carry the date window and restrict the
+        search to X, the last is the minimal form that always parses but falls
+        back to Live Search's own defaults (web + x, 20 results).
         """
         now = datetime.now(timezone.utc)
         from_date = (now - timedelta(hours=max(1, window_hours))).strftime("%Y-%m-%d")
         to_date = now.strftime("%Y-%m-%d")
-        return {
-            "type": config.X_SEARCH_TOOL_TYPE,
-            "fromDate": from_date,
-            "toDate": to_date,
+        tool_type = config.X_SEARCH_TOOL_TYPE
+        sources_objects = [{"type": name} for name in config.X_SEARCH_SOURCES]
+        params = {
+            "sources": sources_objects,
             "from_date": from_date,
             "to_date": to_date,
+            "max_search_results": config.X_SEARCH_MAX_RESULTS,
         }
+        return [
+            # Nested under a key matching the tool type.
+            {"type": tool_type, tool_type: dict(params)},
+            # Flat alongside the type.
+            {"type": tool_type, **params},
+            # Bare source names rather than objects.
+            {"type": tool_type, **{**params, "sources": list(config.X_SEARCH_SOURCES)}},
+            # Minimal: always parses, uses Live Search defaults.
+            {"type": tool_type},
+        ]
+
+    # Retained for callers that only need one payload (the diagnostic script).
+    def _x_search_tool(self, window_hours: int) -> Dict[str, Any]:
+        return self.search_tool_variants(window_hours)[0]
 
     def _completion(self, messages: List[Dict[str, str]], **extra: Any) -> Any:
         return self._client().chat.completions.create(
@@ -416,15 +437,18 @@ class GrokMindshareClient:
                 "json_schema": {"name": "x_mindshare", "strict": True, "schema": MINDSHARE_SCHEMA},
             }
         }
-        tool_arg = {"tools": [self._x_search_tool(window)]}
 
-        # Each attempt drops one capability the endpoint might not support.
-        attempts = (
-            ("x_search", True, {**tool_arg, **schema_arg}),
-            ("x_search", True, tool_arg),
-            ("model_knowledge", False, schema_arg),
-            ("model_knowledge", False, {}),
-        )
+        # Walk every tool shape with the strict schema, then every tool shape
+        # without it, then give up on live data entirely. Shape rejections are
+        # free (they fail at deserialization), so breadth here is cheap.
+        attempts: List[Any] = []
+        for variant in self.search_tool_variants(window):
+            attempts.append(("live_search", True, {"tools": [variant], **schema_arg}))
+        for variant in self.search_tool_variants(window):
+            attempts.append(("live_search", True, {"tools": [variant]}))
+        attempts.append(("model_knowledge", False, schema_arg))
+        attempts.append(("model_knowledge", False, {}))
+        attempts = tuple(attempts)
 
         started = time.monotonic()
         errors: List[str] = []
