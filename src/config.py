@@ -60,6 +60,10 @@ class ChainConfig:
     explorer_token_url: str       # format string with {address}
     native_symbol: str = "ETH"
     goplus_solana: bool = False   # use the GoPlus Solana endpoint instead
+    # Etherscan V2 chain id for on-chain wallet-flow analysis. Deliberately
+    # separate from goplus_id even where the numbers match: the two providers
+    # support different chains and will diverge.
+    etherscan_chain_id: Optional[str] = None
 
 
 CHAINS: Dict[str, ChainConfig] = {
@@ -68,6 +72,7 @@ CHAINS: Dict[str, ChainConfig] = {
         label="Base",
         dexscreener_id="base",
         goplus_id="8453",
+        etherscan_chain_id="8453",
         address_kind="evm",
         explorer_token_url="https://basescan.org/token/{address}",
     ),
@@ -76,6 +81,7 @@ CHAINS: Dict[str, ChainConfig] = {
         label="Ethereum",
         dexscreener_id="ethereum",
         goplus_id="1",
+        etherscan_chain_id="1",
         address_kind="evm",
         explorer_token_url="https://etherscan.io/token/{address}",
     ),
@@ -94,6 +100,7 @@ CHAINS: Dict[str, ChainConfig] = {
         label="BNB Chain",
         dexscreener_id="bsc",
         goplus_id="56",
+        etherscan_chain_id="56",
         address_kind="evm",
         explorer_token_url="https://bscscan.com/token/{address}",
         native_symbol="BNB",
@@ -103,6 +110,7 @@ CHAINS: Dict[str, ChainConfig] = {
         label="Arbitrum",
         dexscreener_id="arbitrum",
         goplus_id="42161",
+        etherscan_chain_id="42161",
         address_kind="evm",
         explorer_token_url="https://arbiscan.io/token/{address}",
     ),
@@ -203,6 +211,28 @@ ENSEMBLE_PROVIDERS = tuple(
     for p in os.getenv("MEMEDD_ENSEMBLE_PROVIDERS", "xai,anthropic,openai").split(",")
     if p.strip()
 )
+
+# --------------------------------------------------------------------------
+# On-chain wallet flow (Etherscan V2)
+# --------------------------------------------------------------------------
+# One free key covers every EVM chain via the chainid parameter: 5 calls/sec,
+# 100k/day. Solana is not an EVM chain and is not covered here.
+ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
+ETHERSCAN_BASE_URL = os.getenv("ETHERSCAN_BASE_URL", "https://api.etherscan.io/v2/api")
+# Transfers pulled per token. Etherscan caps a single query at 10k rows.
+WALLET_FLOW_MAX_TRANSFERS = int(os.getenv("MEMEDD_WALLET_FLOW_MAX_TRANSFERS", "3000"))
+# Window treated as "early" when identifying the first-buyer cohort.
+WALLET_FLOW_EARLY_HOURS = float(os.getenv("MEMEDD_WALLET_FLOW_EARLY_HOURS", "6"))
+# Recent window used for the accumulation/distribution read.
+WALLET_FLOW_RECENT_HOURS = float(os.getenv("MEMEDD_WALLET_FLOW_RECENT_HOURS", "24"))
+# Price moves smaller than this over 24h count as "consolidation", the state in
+# which quiet accumulation is worth flagging.
+WALLET_FLOW_CONSOLIDATION_PCT = float(os.getenv("MEMEDD_WALLET_FLOW_CONSOLIDATION_PCT", "12"))
+CACHE_TTL_WALLET_FLOW = int(os.getenv("MEMEDD_CACHE_TTL_WALLET_FLOW", "300"))
+
+# Your own smart-money list: wallets and X handles you already trust. Highest
+# precision signal in the app, and it costs nothing. See the .example file.
+SMART_MONEY_PATH = Path(os.getenv("MEMEDD_SMART_MONEY_PATH", DATA_DIR / "smart_money.json"))
 
 # --- X / Twitter mindshare via Grok live search ----------------------------
 # Grok is the only major model with first-party access to X, which is where
@@ -396,6 +426,8 @@ class AppSettings:
     use_ensemble: bool = False
     # Query X/Twitter through Grok for real social mindshare.
     use_x_search: bool = False
+    # On-chain wallet flow / smart-money analysis.
+    use_wallet_flow: bool = False
     # default_factory, not a bare default: a plain default would bind the
     # module value at import time and then ignore any later change to it,
     # which silently freezes whatever the developer's .env said at startup.

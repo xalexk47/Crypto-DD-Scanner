@@ -152,9 +152,29 @@ def build_query(snapshot: TokenSnapshot) -> str:
     return " OR ".join(parts) if parts else snapshot.address
 
 
-def build_prompt(snapshot: TokenSnapshot, window_hours: int, max_posts: int) -> str:
-    """The user turn: what to search for and how to disambiguate it."""
+def build_prompt(
+    snapshot: TokenSnapshot,
+    window_hours: int,
+    max_posts: int,
+    smart_money_handles: Optional[List[str]] = None,
+) -> str:
+    """The user turn: what to search for and how to disambiguate it.
+
+    When the user has nominated smart-money handles, the model is asked to
+    check those specifically. "Has anyone I rate mentioned this?" is a far
+    sharper question than "is there buzz?".
+    """
     chain_label = config.get_chain(snapshot.chain).label
+    handles_note = ""
+    if smart_money_handles:
+        listed = ", ".join("@" + h for h in smart_money_handles[:20])
+        handles_note = (
+            f"\n\nThe user tracks these accounts as smart money: {listed}.\n"
+            f"Check explicitly whether any of them have posted about this token in the "
+            f"window. If they have, put them first in notable_accounts and quote them in "
+            f"sample_posts. If none have, say so plainly in the summary - their silence "
+            f"is itself informative. Do not claim a post you did not find."
+        )
     return (
         f"Search X for current discussion of this token and report what you find.\n\n"
         f"Token: {snapshot.name or 'unknown'} (${snapshot.symbol or '?'})\n"
@@ -166,6 +186,7 @@ def build_prompt(snapshot: TokenSnapshot, window_hours: int, max_posts: int) -> 
         f"definitely this token; for ticker-only posts, judge from context whether "
         f"they refer to the {chain_label} token, and ignore them if they clearly do not.\n\n"
         f"Include up to {max_posts} representative posts in sample_posts."
+        + handles_note
     )
 
 
@@ -440,9 +461,14 @@ class GrokMindshareClient:
 
         window = window_hours if window_hours is not None else config.X_SEARCH_WINDOW_HOURS
         max_posts = config.X_SEARCH_MAX_POSTS
+        from .wallet_flow import watchlist_handles      # local import avoids a cycle
+
         messages = [
             {"role": "system", "content": MINDSHARE_SYSTEM_PROMPT},
-            {"role": "user", "content": build_prompt(snapshot, window, max_posts)},
+            {
+                "role": "user",
+                "content": build_prompt(snapshot, window, max_posts, watchlist_handles()),
+            },
         ]
         # Structured-output syntax differs between the two endpoints.
         chat_schema = {

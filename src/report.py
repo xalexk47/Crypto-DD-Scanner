@@ -149,6 +149,43 @@ def to_markdown(result: AnalysisResult) -> str:
             add(f"- {link.label or link.kind.title()}: {link.url}")
         add("")
 
+    # --- wallet flow --------------------------------------------------------
+    flow = result.wallet_flow
+    if flow is not None and flow.available:
+        add("## On-chain wallet flow")
+        add("")
+        add(f"**{flow.headline}**")
+        add("")
+        add(f"- Wallets accumulating / distributing: **{flow.accumulating_wallets} / {flow.distributing_wallets}**")
+        if flow.net_flow_pct_of_supply is not None:
+            add(f"- Net flow: **{flow.net_flow_pct_of_supply:+.3f}%** of supply")
+        add(f"- Price is {'consolidating' if flow.consolidating else 'moving'}")
+        add(f"- Early buyers: {flow.early_buyers:,}"
+            + (f", {flow.early_hold_rate * 100:.0f}% still holding" if flow.early_hold_rate is not None else ""))
+        if flow.fresh_wallet_ratio is not None:
+            add(f"- One-and-done wallets: {flow.fresh_wallet_ratio * 100:.0f}%")
+        add(f"- Transfers analyzed: {flow.transfers_analyzed:,} (source: {flow.source})")
+        add("")
+        if flow.watchlist_hits:
+            add("**Smart-money watchlist hits**")
+            add("")
+            for hit in flow.watchlist_hits:
+                direction = "accumulating" if hit.net_tokens > 0 else "distributing"
+                add(f"- **{hit.label or 'watchlist wallet'}** is {direction} — `{hit.address}`")
+            add("")
+        for note in flow.notes:
+            add(f"- {note}")
+        for warning in flow.warnings:
+            add(f"- ⚠️ {warning}")
+        add("")
+        add("_Observed transfer behaviour only; this is not a claim about any wallet's track record._")
+        add("")
+    elif flow is not None and flow.error:
+        add("## On-chain wallet flow")
+        add("")
+        add(f"Unavailable: {flow.error}")
+        add("")
+
     # --- X mindshare -------------------------------------------------------
     mindshare = result.mindshare
     if mindshare is not None and mindshare.available:

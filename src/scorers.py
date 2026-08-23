@@ -36,6 +36,7 @@ from .models import (
     ScoreCard,
     SecurityReport,
     TokenSnapshot,
+    WalletFlowReport,
 )
 from .utils import clamp, log_scale, safe_ratio, scale
 
@@ -244,15 +245,98 @@ def score_liquidity(snapshot: TokenSnapshot, security: Optional[SecurityReport] 
 # ==========================================================================
 # Pillar 3 - Holder distribution (15%)
 # ==========================================================================
-def score_holders(security: Optional[SecurityReport], snapshot: Optional[TokenSnapshot] = None) -> ComponentScore:
-    """Concentration risk: how few wallets can nuke the chart."""
+def _apply_wallet_flow(
+    score: float,
+    confidence: float,
+    reasons: List[str],
+    wallet_flow: Optional[WalletFlowReport],
+) -> Tuple[float, float]:
+    """Adjust the holder score by which way wallets are actually moving.
+
+    Kept separate from the concentration logic because the two come from
+    different providers: a chain can have wallet flow without GoPlus holder
+    data, and dropping the flow in that case would throw away the only holder
+    signal available.
+    """
+    if wallet_flow is None or not wallet_flow.available:
+        return score, confidence
+
+    if wallet_flow.quiet_accumulation:
+        score += 12
+        reasons.append(
+            "Wallets accumulating while price consolidates - positioning ahead of a move."
+        )
+    elif wallet_flow.accumulation_verdict == "accumulating":
+        score += 6
+        reasons.append(
+            f"{wallet_flow.accumulating_wallets} wallets accumulating vs "
+            f"{wallet_flow.distributing_wallets} distributing."
+        )
+    elif wallet_flow.accumulation_verdict == "distributing":
+        score -= 10
+        reasons.append(
+            f"Net distribution: {wallet_flow.distributing_wallets} wallets selling vs "
+            f"{wallet_flow.accumulating_wallets} buying."
+        )
+
+    hold_rate = wallet_flow.early_hold_rate
+    if hold_rate is not None and wallet_flow.early_buyers >= 5:
+        if hold_rate >= 0.6:
+            score += 5
+            reasons.append(f"{hold_rate * 100:.0f}% of early buyers still holding.")
+        elif hold_rate <= 0.3:
+            score -= 8
+            reasons.append(f"Only {hold_rate * 100:.0f}% of early buyers still hold.")
+
+    # A wall of one-and-done wallets is farming, not demand.
+    if (wallet_flow.fresh_wallet_ratio or 0) >= 0.8:
+        score -= 10
+        reasons.append(
+            f"{wallet_flow.fresh_wallet_ratio * 100:.0f}% of active wallets bought once and "
+            "never traded again - looks like farming or bots."
+        )
+
+    # A watchlist hit is the user's own judgement, so it outweighs any
+    # heuristic here.
+    accumulating_hits = [w for w in wallet_flow.watchlist_hits if w.net_tokens > 0]
+    leaving_hits = [w for w in wallet_flow.watchlist_hits if w.net_tokens <= 0]
+    if accumulating_hits:
+        score += min(15, 7 * len(accumulating_hits))
+        reasons.append(
+            f"{len(accumulating_hits)} wallet(s) from your smart-money list are accumulating."
+        )
+    if leaving_hits:
+        score -= min(15, 7 * len(leaving_hits))
+        reasons.append(
+            f"{len(leaving_hits)} wallet(s) from your smart-money list are distributing."
+        )
+
+    return score, min(0.95, confidence + 0.05)
+
+
+def score_holders(
+    security: Optional[SecurityReport],
+    snapshot: Optional[TokenSnapshot] = None,
+    wallet_flow: Optional[WalletFlowReport] = None,
+) -> ComponentScore:
+    """Concentration risk, plus which direction the holders are moving.
+
+    Concentration is a snapshot; flow is the derivative. A tightly held token
+    whose wallets are accumulating is a very different proposition from the
+    same token being quietly distributed into.
+    """
     reasons: List[str] = []
     weight = config.DEFAULT_WEIGHTS.holders
 
     if security is None or not security.available or security.top10_pct_adjusted is None:
+        # No concentration data. Wallet flow is an independent source, so it
+        # still applies -- on a chain with no security provider at all it may
+        # be the only holder signal available.
+        reasons.append("Holder data unavailable - concentration risk is unknown.")
+        score, confidence = _apply_wallet_flow(45.0, 0.25, reasons, wallet_flow)
         return ComponentScore(
-            key="holders", label=config.COMPONENT_LABELS["holders"], score=45.0, weight=weight,
-            reasons=["Holder data unavailable - concentration risk is unknown."], confidence=0.25,
+            key="holders", label=config.COMPONENT_LABELS["holders"], score=clamp(score),
+            weight=weight, reasons=reasons, confidence=confidence,
         )
 
     top10 = security.top10_pct_adjusted
@@ -301,9 +385,12 @@ def score_holders(security: Optional[SecurityReport], snapshot: Optional[TokenSn
     else:
         reasons.append("Holder count unavailable.")
 
+    confidence = 0.85 if holder_count else 0.65
+    score, confidence = _apply_wallet_flow(score, confidence, reasons, wallet_flow)
+
     return ComponentScore(
         key="holders", label=config.COMPONENT_LABELS["holders"], score=clamp(score),
-        weight=weight, reasons=reasons, confidence=0.85 if holder_count else 0.65,
+        weight=weight, reasons=reasons, confidence=confidence,
     )
 
 
@@ -566,6 +653,7 @@ def build_scorecard(
     narrative: Optional[NarrativeReport] = None,
     weights: Optional[config.ScoreWeights] = None,
     mindshare: Optional[MindshareReport] = None,
+    wallet_flow: Optional[WalletFlowReport] = None,
 ) -> ScoreCard:
     """Run every pillar and combine into a composite score + decision."""
     weights = weights or config.DEFAULT_WEIGHTS
@@ -575,7 +663,7 @@ def build_scorecard(
     components = [
         score_security(security),
         score_liquidity(snapshot, security),
-        score_holders(security, snapshot),
+        score_holders(security, snapshot, wallet_flow),
         score_momentum(snapshot, mindshare),
         score_narrative(snapshot, narrative),
         score_catalyst(snapshot, security),
@@ -609,6 +697,20 @@ def build_scorecard(
         risks.append("Pair is under 24 hours old - the majority of rugs happen in this window.")
     if not snapshot.has_socials:
         risks.append("No socials listed - no community channel to sustain a narrative.")
+    if wallet_flow is not None and wallet_flow.available:
+        if wallet_flow.quiet_accumulation:
+            positives.append(
+                "Quiet accumulation: wallets are adding while the price is range-bound."
+            )
+        if wallet_flow.watchlist_hits:
+            for hit in wallet_flow.watchlist_hits:
+                label = hit.label or "watchlist wallet"
+                if hit.net_tokens > 0:
+                    positives.append(f"Smart-money watchlist: {label} is accumulating.")
+                else:
+                    risks.append(f"Smart-money watchlist: {label} is distributing.")
+        risks.extend(wallet_flow.warnings)
+
     if mindshare is not None and mindshare.available and mindshare.is_live:
         if mindshare.is_organic is False:
             risks.append("X discussion looks coordinated rather than organic.")

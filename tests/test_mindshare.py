@@ -9,7 +9,7 @@ import pytest
 from src import config, mindshare as ms, scorers
 from src.data_fetchers import snapshot_from_pair
 from src.models import MindshareReport, TokenSnapshot
-from tests.fake_llm import FakeOpenAIClient, FakeResponsesClient
+from tests.fake_llm import FakeResponsesClient
 from tests.fixtures import TOKEN_ADDRESS, dexscreener_pair
 
 

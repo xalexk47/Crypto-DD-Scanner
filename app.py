@@ -17,7 +17,8 @@ from typing import List
 import pandas as pd
 import streamlit as st
 
-from src import config, data_fetchers, history, llm, llm_analyzers, mindshare, report, ui
+from src import (config, data_fetchers, history, llm, llm_analyzers, mindshare,
+                 report, ui, wallet_flow)
 from src.analyzer import analyze_many, analyze_token, scan
 from src.models import AnalysisResult, ScanCandidate
 from src.utils import fmt_usd, parse_addresses, score_emoji, short_address
@@ -42,13 +43,14 @@ st.set_page_config(
 @st.cache_data(ttl=config.CACHE_TTL_TOKEN, show_spinner=False)
 def cached_analyze(
     address: str, chain: str, portfolio_usd: float, risk_profile: str, use_llm: bool,
-    use_ensemble: bool, providers: tuple, blend_weight: float, use_x_search: bool, nonce: int
+    use_ensemble: bool, providers: tuple, blend_weight: float, use_x_search: bool,
+    use_wallet_flow: bool, nonce: int
 ) -> AnalysisResult:
     """Analyze one address.  ``nonce`` busts the cache on a manual refresh."""
     settings = config.AppSettings(
         chain=chain, portfolio_usd=portfolio_usd, risk_profile=risk_profile, use_llm=use_llm,
         use_ensemble=use_ensemble, ensemble_providers=providers, blend_weight=blend_weight,
-        use_x_search=use_x_search,
+        use_x_search=use_x_search, use_wallet_flow=use_wallet_flow,
     )
     return analyze_token(address, settings)
 
@@ -56,12 +58,13 @@ def cached_analyze(
 @st.cache_data(ttl=config.CACHE_TTL_TOKEN, show_spinner=False)
 def cached_analyze_many(
     addresses: List[str], chain: str, portfolio_usd: float, risk_profile: str, use_llm: bool,
-    use_ensemble: bool, providers: tuple, blend_weight: float, use_x_search: bool, nonce: int
+    use_ensemble: bool, providers: tuple, blend_weight: float, use_x_search: bool,
+    use_wallet_flow: bool, nonce: int
 ) -> List[AnalysisResult]:
     settings = config.AppSettings(
         chain=chain, portfolio_usd=portfolio_usd, risk_profile=risk_profile, use_llm=use_llm,
         use_ensemble=use_ensemble, ensemble_providers=providers, blend_weight=blend_weight,
-        use_x_search=use_x_search,
+        use_x_search=use_x_search, use_wallet_flow=use_wallet_flow,
     )
     return analyze_many(addresses, settings)
 
@@ -168,6 +171,28 @@ def render_sidebar() -> config.AppSettings:
             help="Single-model narrative. Requires an API key in .env; falls back to heuristics automatically.",
         )
 
+        st.markdown("#### 🐋 Wallet flow")
+        flow_reason = wallet_flow.EtherscanClient().unavailable_reason(chain)
+        st.caption("✅ Etherscan ready" if not flow_reason else f"⚪ {flow_reason}")
+        use_wallet_flow = st.toggle(
+            "Analyze on-chain wallet flow",
+            value=False,
+            disabled=bool(flow_reason),
+            help=(
+                "Reads token transfers to find who is buying, whether early buyers still "
+                "hold, and whether wallets are quietly accumulating while price is flat."
+                if not flow_reason else flow_reason
+            ),
+        )
+        watch = wallet_flow.load_watchlist()
+        if watch["wallets"] or watch["x_handles"]:
+            st.caption(
+                f"⭐ Watchlist: {len(watch['wallets'])} wallet(s), "
+                f"{len(watch['x_handles'])} X handle(s)"
+            )
+        else:
+            st.caption("⭐ No watchlist — see data/smart_money.example.json")
+
         st.markdown("#### 𝕏 Mindshare (Grok)")
         x_reason = mindshare.GrokMindshareClient().unavailable_reason()
         st.caption(("✅ Grok X search ready" if not x_reason else f"⚪ {x_reason}"))
@@ -238,6 +263,7 @@ def render_sidebar() -> config.AppSettings:
             st.cache_data.clear()
             data_fetchers.clear_caches()
             mindshare.clear_cache()
+            wallet_flow.clear_cache()
             st.session_state["cache_nonce"] += 1
             st.toast("Caches cleared — next request hits the APIs live.")
 
@@ -253,6 +279,7 @@ def render_sidebar() -> config.AppSettings:
         weights=weights,
         use_llm=use_llm,
         use_x_search=bool(use_x_search),
+        use_wallet_flow=bool(use_wallet_flow),
         use_ensemble=bool(use_ensemble and selected_providers),
         ensemble_providers=selected_providers,
         blend_weight=blend_weight,
@@ -281,6 +308,8 @@ def render_result(result: AnalysisResult, settings: config.AppSettings) -> None:
     st.markdown("")
     ui.render_profile(result.profile)
     ui.render_narrative(result, used_llm=settings.use_llm)
+    st.markdown("")
+    ui.render_wallet_flow(result.wallet_flow, result.chain)
     st.markdown("")
     ui.render_mindshare(result.mindshare)
     st.markdown("")
@@ -328,7 +357,7 @@ def run_analysis(addresses: List[str], settings: config.AppSettings) -> None:
         args = (
             settings.chain, settings.portfolio_usd, settings.risk_profile, settings.use_llm,
             settings.use_ensemble, tuple(settings.ensemble_providers), settings.blend_weight,
-            settings.use_x_search, st.session_state["cache_nonce"],
+            settings.use_x_search, settings.use_wallet_flow, st.session_state["cache_nonce"],
         )
         if len(addresses) == 1:
             results = [cached_analyze(addresses[0], *args)]

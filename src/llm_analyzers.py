@@ -52,6 +52,7 @@ from .models import (
     SecurityReport,
     TokenProfile,
     TokenSnapshot,
+    WalletFlowReport,
 )
 from .utils import clamp, safe_float
 
@@ -171,6 +172,7 @@ def build_analysis_payload(
     scorecard: Optional[ScoreCard] = None,
     profile: Optional[TokenProfile] = None,
     mindshare: Optional[MindshareReport] = None,
+    wallet_flow: Optional[WalletFlowReport] = None,
 ) -> Dict[str, Any]:
     """Assemble the full structured token payload sent to every model.
 
@@ -225,6 +227,7 @@ def build_analysis_payload(
         "platform_deterministic_score": None,
         "dexscreener_profile": None,
         "x_mindshare": None,
+        "onchain_wallet_flow": None,
     }
 
     if security is not None and security.available:
@@ -268,6 +271,30 @@ def build_analysis_payload(
             "vetoed": scorecard.vetoed,
             "veto_reason": scorecard.veto_reason or None,
             "pillars": {c.key: round(c.score, 1) for c in scorecard.components},
+        }
+
+    if wallet_flow is not None and wallet_flow.available:
+        payload["onchain_wallet_flow"] = {
+            "verdict": wallet_flow.accumulation_verdict,
+            "quiet_accumulation": wallet_flow.quiet_accumulation,
+            "price_consolidating": wallet_flow.consolidating,
+            "wallets_accumulating": wallet_flow.accumulating_wallets,
+            "wallets_distributing": wallet_flow.distributing_wallets,
+            "net_flow_pct_of_supply": wallet_flow.net_flow_pct_of_supply,
+            "early_buyers": wallet_flow.early_buyers,
+            "early_still_holding_pct": (
+                round(wallet_flow.early_hold_rate * 100, 1)
+                if wallet_flow.early_hold_rate is not None else None
+            ),
+            "one_and_done_wallet_ratio": wallet_flow.fresh_wallet_ratio,
+            "transfers_analyzed": wallet_flow.transfers_analyzed,
+            "user_watchlist_wallets_present": [
+                {"label": w.label, "net_tokens": w.net_tokens} for w in wallet_flow.watchlist_hits
+            ] or None,
+            "note": (
+                "Observed transfer behaviour, not a claim about anyone's skill. "
+                "Watchlist wallets were nominated by the user as smart money."
+            ),
         }
 
     if mindshare is not None and mindshare.available:
@@ -1001,6 +1028,7 @@ def run_ensemble(
     scorecard: Optional[ScoreCard] = None,
     profile: Optional[TokenProfile] = None,
     mindshare: Optional[MindshareReport] = None,
+    wallet_flow: Optional[WalletFlowReport] = None,
     providers: Optional[Sequence[str]] = None,
     clients: Optional[Dict[str, Any]] = None,
     blend_weight: float = config.ENSEMBLE_BLEND_WEIGHT,
@@ -1029,7 +1057,7 @@ def run_ensemble(
         result.elapsed_ms = int((time.monotonic() - started) * 1000)
         return result
 
-    payload = build_analysis_payload(snapshot, security, scorecard, profile, mindshare)
+    payload = build_analysis_payload(snapshot, security, scorecard, profile, mindshare, wallet_flow)
     wall_clock = timeout if timeout is not None else config.LLM_TIMEOUT_SECONDS + 15
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(analyzers))

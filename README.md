@@ -107,6 +107,63 @@ Position sizing is not a fixed percentage — it is derived, in this order:
 
 ---
 
+## On-chain wallet flow & smart money
+
+Optional, needs a **free** [Etherscan API key](https://etherscan.io/apis) — one key
+covers Base, Ethereum, Arbitrum and BSC (5 calls/sec, 100k/day). Toggle
+**Analyze on-chain wallet flow** in the sidebar.
+
+Reads raw ERC-20 transfer logs and works out who is actually buying:
+
+- **Quiet accumulation** — the headline signal: wallets net accumulating *while
+  the price is range-bound*. Buying a rip is chasing; buying a flat chart is
+  positioning. Requires both conditions, so a pump never triggers it.
+- **Accumulation vs distribution** — wallet counts and net flow as a share of supply
+- **Early-buyer cohort** — who bought first, how many still hold, how many flipped
+- **One-and-done wallets** — a wall of wallets that bought once and never traded
+  again is farming or bots, and *lowers* the score rather than reading as demand
+- **Your watchlist** — wallets you nominated, flagged by name when they appear
+
+Buys and sells are counted only when tokens move **to or from the liquidity
+pool**. Wallet-to-wallet transfers are ignored: they move tokens without
+expressing conviction, and counting them is how naive trackers get fooled by
+self-transfers.
+
+### What this deliberately does not claim
+
+It does **not** compute historical win rates. A real win-rate needs the price at
+the moment of every trade a wallet ever made, across every token it touched —
+which no free explorer API exposes, and is exactly what paid services like Cielo
+($199/mo) sell. Deriving one from transfer logs would produce a confident-looking
+number with nothing behind it, which is worse than no number. Everything here is
+an **observation about behaviour**, never a claim about anyone's skill.
+
+### The watchlist is the sharp edge
+
+```bash
+cp data/smart_money.example.json data/smart_money.json
+```
+
+```json
+{
+  "wallets": [{ "address": "0x...", "label": "caught BRETT at 200k" }],
+  "x_handles": ["someanalyst"]
+}
+```
+
+Wallets you already trust — exported from Cielo, Arkham, Nansen or your own
+notes — get flagged by name whenever they appear in a token's flow, and weigh
+more in the score than any heuristic here. The X handles are handed to Grok,
+which then reports specifically whether *those accounts* have posted about the
+token rather than generic chatter. `data/smart_money.json` is gitignored.
+
+Wallet flow feeds the **Holder Distribution** pillar, and is included in the
+payload every ensemble model sees. It runs on Etherscan V2 chains only — Solana
+and Robinhood Chain fall back to the same clearly-labelled "unavailable" path as
+the security checks.
+
+---
+
 ## X / Twitter mindshare (Grok)
 
 Optional, off by default, needs `XAI_API_KEY`. Toggle **Query X via Grok** in the
@@ -408,12 +465,13 @@ src/
   llm.py                Narrative layer (single model, prose output)
   llm_analyzers.py      Multi-LLM ensemble: strict JSON, parallel, consensus
   mindshare.py          X/Twitter mindshare via Grok's server-side search
+  wallet_flow.py        On-chain wallet flow + smart-money watchlist (Etherscan)
   history.py            Local SQLite history
   report.py             Markdown / JSON export
   ui.py                 Reusable Streamlit components + CSS
   utils.py              Formatting, address parsing, safe coercion, TTL cache
   scripts/check_grok.py Diagnose your Grok key, models and X search access
-tests/                  222 unit + end-to-end tests (network and LLMs stubbed)
+tests/                  264 unit + end-to-end tests (network and LLMs stubbed)
 .streamlit/config.toml  Dark theme
 ```
 

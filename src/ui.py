@@ -12,7 +12,7 @@ import streamlit as st
 
 from . import config
 from .models import (AnalysisResult, EnsembleResult, MindshareReport, ScoreCard,
-                     SecurityReport, TokenProfile, TokenSnapshot)
+                     SecurityReport, TokenProfile, TokenSnapshot, WalletFlowReport)
 from .utils import fmt_number, fmt_pct, fmt_usd, score_color, score_emoji, short_address
 
 # --------------------------------------------------------------------------
@@ -609,6 +609,119 @@ def render_mindshare(mindshare: Optional[MindshareReport]) -> None:
         st.caption("Notable accounts: " + ", ".join(f"@{h}" for h in mindshare.notable_accounts))
     footer = [f"Query: `{mindshare.query}`", f"{mindshare.latency_ms / 1000:.1f}s", mindshare.model]
     st.caption(" · ".join(x for x in footer if x))
+
+
+_VERDICT_COLORS = {
+    "accumulating": "#22c55e", "distributing": "#ef4444",
+    "balanced": "#eab308", "unknown": "#8b98a9",
+}
+
+
+def render_wallet_flow(flow: Optional[WalletFlowReport], chain_key: str = "") -> None:
+    """On-chain wallet flow: who is buying and whether they're staying."""
+    if flow is None:
+        return
+
+    st.markdown("#### 🐋 Wallet flow <span class='mdd-badge'>etherscan</span>", unsafe_allow_html=True)
+
+    if not flow.available:
+        st.info(flow.error or "Wallet flow was not requested.", icon="🐋")
+        return
+
+    color = _VERDICT_COLORS.get(flow.accumulation_verdict, "#8b98a9")
+    chain_cfg = config.get_chain(chain_key or flow.chain)
+
+    left, right = st.columns([1, 2], gap="large")
+    with left:
+        badge = (
+            '<span class="mdd-badge mdd-live">● QUIET ACCUMULATION</span>'
+            if flow.quiet_accumulation else
+            f'<span class="mdd-badge" style="color:{color};border-color:{color}55;">'
+            f'{flow.accumulation_verdict.upper()}</span>'
+        )
+        st.markdown(
+            f"""
+            <div class="mdd-card" style="text-align:center;">
+              <div>{badge}</div>
+              <div class="mdd-score-num" style="color:{color};margin-top:.6rem;">
+                {flow.accumulating_wallets}<span class="mdd-score-den"> / {flow.distributing_wallets}</span>
+              </div>
+              <div class="mdd-note">wallets buying / selling</div>
+              <div class="mdd-note" style="margin-top:.7rem;">
+                price {"consolidating" if flow.consolidating else "moving"} ·
+                {flow.unique_wallets:,} wallets seen
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with right:
+        hold_rate = flow.early_hold_rate
+        rows = [
+            ("Verdict", flow.headline),
+            ("Early buyers", f"{flow.early_buyers:,}"),
+            ("Early buyers still holding",
+             fmt_pct(hold_rate * 100, 0) if hold_rate is not None else "n/a"),
+            ("Early buyers who flipped", f"{flow.early_flipped:,}"),
+            ("Net flow (% of supply)",
+             fmt_pct(flow.net_flow_pct_of_supply, 3) if flow.net_flow_pct_of_supply is not None else "n/a"),
+            ("One-and-done wallets",
+             fmt_pct(flow.fresh_wallet_ratio * 100, 0) if flow.fresh_wallet_ratio is not None else "n/a"),
+            ("Transfers analyzed", f"{flow.transfers_analyzed:,}"),
+        ]
+        body = "".join(
+            f'<div class="mdd-kv"><span>{k}</span><span>{v}</span></div>' for k, v in rows
+        )
+        st.markdown(f'<div class="mdd-card"><h3>Flow detail</h3>{body}</div>', unsafe_allow_html=True)
+
+    if flow.watchlist_hits:
+        st.markdown("##### ⭐ Your smart-money watchlist")
+        for hit in flow.watchlist_hits:
+            direction = "accumulating" if hit.net_tokens > 0 else "distributing"
+            icon = "🟢" if hit.net_tokens > 0 else "🔴"
+            link = chain_cfg.explorer_token_url.split("/token/")[0] + f"/address/{hit.address}"
+            st.markdown(
+                f"{icon} **{hit.label or 'watchlist wallet'}** is {direction} — "
+                f"[{short_address(hit.address, 8, 6)}]({link}) · {hit.tx_count} trades"
+            )
+
+    for note in flow.notes:
+        st.success(note, icon="✅")
+    for warning in flow.warnings:
+        st.warning(warning, icon="⚠️")
+
+    if flow.top_accumulators or flow.top_distributors:
+        with st.expander("Top accumulators and distributors"):
+            import pandas as pd
+
+            def frame(wallets, label):
+                return pd.DataFrame([
+                    {
+                        "Wallet": short_address(w.address, 10, 6),
+                        "Net tokens": round(w.net_tokens, 2),
+                        "Bought": round(w.bought_tokens, 2),
+                        "Sold": round(w.sold_tokens, 2),
+                        "Trades": w.tx_count,
+                        "Tag": w.label or "",
+                    } for w in wallets
+                ]) if wallets else None
+
+            left_col, right_col = st.columns(2, gap="medium")
+            with left_col:
+                st.markdown("**Accumulating**")
+                data = frame(flow.top_accumulators, "acc")
+                st.dataframe(data, use_container_width=True, hide_index=True) if data is not None \
+                    else st.caption("None.")
+            with right_col:
+                st.markdown("**Distributing**")
+                data = frame(flow.top_distributors, "dist")
+                st.dataframe(data, use_container_width=True, hide_index=True) if data is not None \
+                    else st.caption("None.")
+            st.caption(
+                "Observed transfer behaviour only — this says nothing about any wallet's "
+                "track record. Add wallets you trust to data/smart_money.json to get "
+                "labelled hits above."
+            )
 
 
 def render_ensemble(ensemble: Optional[EnsembleResult], deterministic: Optional[ScoreCard] = None) -> None:

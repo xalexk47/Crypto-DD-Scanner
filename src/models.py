@@ -358,6 +358,112 @@ class NarrativeReport:
 
 
 # --------------------------------------------------------------------------
+# On-chain wallet flow / smart money
+# --------------------------------------------------------------------------
+@dataclass
+class WalletActivity:
+    """One wallet's behaviour in a single token."""
+
+    address: str
+    bought_tokens: float = 0.0        # units received from the pool
+    sold_tokens: float = 0.0          # units sent back to the pool
+    first_seen_ts: Optional[int] = None   # epoch seconds
+    last_seen_ts: Optional[int] = None
+    tx_count: int = 0
+    label: str = ""                   # watchlist name, when matched
+
+    @property
+    def net_tokens(self) -> float:
+        return self.bought_tokens - self.sold_tokens
+
+    @property
+    def is_accumulating(self) -> bool:
+        return self.net_tokens > 0
+
+    @property
+    def round_tripped(self) -> bool:
+        """Bought and sold - a flipper rather than a holder."""
+        return self.bought_tokens > 0 and self.sold_tokens > 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data.update(net_tokens=self.net_tokens, is_accumulating=self.is_accumulating)
+        return data
+
+
+@dataclass
+class WalletFlowReport:
+    """Who is actually buying, and are they adding or leaving.
+
+    Derived from raw transfer logs, so every field here is an observation
+    rather than a claim about anyone's skill. The one exception is
+    ``watchlist_hits``: those are wallets *you* nominated as smart money.
+    """
+
+    chain: str = ""
+    address: str = ""
+    available: bool = False
+    error: str = ""
+    source: str = "etherscan_v2"
+    latency_ms: int = 0
+
+    transfers_analyzed: int = 0
+    unique_wallets: int = 0
+    pool_addresses: List[str] = field(default_factory=list)
+
+    # Accumulation / distribution over the recent window.
+    accumulating_wallets: int = 0
+    distributing_wallets: int = 0
+    net_flow_tokens: float = 0.0          # positive = wallets net buying
+    net_flow_pct_of_supply: Optional[float] = None
+
+    # Early cohort.
+    early_buyers: int = 0
+    early_still_holding: int = 0
+    early_flipped: int = 0
+
+    # Quality signals.
+    fresh_wallet_ratio: Optional[float] = None   # 0-1, wallets new to this token
+    top_accumulators: List[WalletActivity] = field(default_factory=list)
+    top_distributors: List[WalletActivity] = field(default_factory=list)
+
+    # The headline pattern the user cares about.
+    quiet_accumulation: bool = False
+    consolidating: bool = False
+    accumulation_verdict: str = "unknown"   # accumulating | distributing | balanced | unknown
+
+    watchlist_hits: List[WalletActivity] = field(default_factory=list)
+    notes: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+    @property
+    def early_hold_rate(self) -> Optional[float]:
+        if not self.early_buyers:
+            return None
+        return self.early_still_holding / self.early_buyers
+
+    @property
+    def headline(self) -> str:
+        if not self.available:
+            return "No wallet-flow data"
+        if self.quiet_accumulation:
+            return "Quiet accumulation during consolidation"
+        return {
+            "accumulating": "Wallets net accumulating",
+            "distributing": "Wallets net distributing",
+            "balanced": "Flow roughly balanced",
+        }.get(self.accumulation_verdict, "Flow unclear")
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        for key in ("top_accumulators", "top_distributors", "watchlist_hits"):
+            data[key] = [w.to_dict() for w in getattr(self, key)]
+        data["early_hold_rate"] = self.early_hold_rate
+        data["headline"] = self.headline
+        return data
+
+
+# --------------------------------------------------------------------------
 # X / Twitter mindshare (Grok live search)
 # --------------------------------------------------------------------------
 @dataclass
@@ -570,6 +676,7 @@ class AnalysisResult:
     ensemble: Optional[EnsembleResult] = None
     profile: Optional[TokenProfile] = None
     mindshare: Optional[MindshareReport] = None
+    wallet_flow: Optional[WalletFlowReport] = None
     data_warnings: List[str] = field(default_factory=list)
     analyzed_at: str = ""
 
@@ -603,6 +710,7 @@ class AnalysisResult:
             "ensemble": self.ensemble.to_dict() if self.ensemble else None,
             "profile": self.profile.to_dict() if self.profile else None,
             "mindshare": self.mindshare.to_dict() if self.mindshare else None,
+            "wallet_flow": self.wallet_flow.to_dict() if self.wallet_flow else None,
         }
 
 

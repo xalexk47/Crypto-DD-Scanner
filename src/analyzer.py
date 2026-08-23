@@ -12,7 +12,8 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Sequence, Tuple
 
-from . import config, data_fetchers, llm, llm_analyzers, mindshare as mindshare_mod, scorers
+from . import (config, data_fetchers, llm, llm_analyzers, mindshare as mindshare_mod,
+               scorers, wallet_flow as wallet_flow_mod)
 from .models import AnalysisResult, ScanCandidate, TokenSnapshot
 from .utils import normalize_address, utcnow_iso
 
@@ -79,13 +80,21 @@ def analyze_token(
         if not report.available and report.error:
             result.data_warnings.append(f"X mindshare: {report.error}")
 
+    # --- 2c. on-chain wallet flow ----------------------------------------
+    if settings.use_wallet_flow:
+        flow = wallet_flow_mod.fetch_wallet_flow(snapshot, use_cache=use_cache)
+        result.wallet_flow = flow
+        if not flow.available and flow.error:
+            result.data_warnings.append(f"Wallet flow: {flow.error}")
+
     # --- 3. narrative (heuristic today, LLM-ready) -----------------------
     provider_name = None if settings.use_llm else "heuristic"
     result.narrative = llm.analyze_narrative(snapshot, security, provider_name=provider_name)
 
     # --- 4. score --------------------------------------------------------
     scorecard = scorers.build_scorecard(
-        snapshot, security, result.narrative, weights=settings.weights, mindshare=result.mindshare,
+        snapshot, security, result.narrative, weights=settings.weights,
+        mindshare=result.mindshare, wallet_flow=result.wallet_flow,
     )
     result.scorecard = scorecard
 
@@ -109,6 +118,7 @@ def analyze_token(
             scorecard,
             profile=result.profile,
             mindshare=result.mindshare,
+            wallet_flow=result.wallet_flow,
             providers=settings.ensemble_providers,
             blend_weight=settings.blend_weight,
         )

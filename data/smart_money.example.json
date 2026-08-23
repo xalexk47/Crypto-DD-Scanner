@@ -1,0 +1,17 @@
+{
+  "_comment": [
+    "Copy this file to data/smart_money.json and put your own entries in it.",
+    "This is the highest-precision signal in the app: wallets and accounts YOU",
+    "have decided are worth following. Nothing here is shipped or shared -",
+    "data/smart_money.json is gitignored.",
+    "Export wallet lists from Cielo, Arkham, Nansen or your own notes."
+  ],
+  "wallets": [
+    { "address": "0x0000000000000000000000000000000000000001", "label": "example - caught BRETT early" },
+    { "address": "0x0000000000000000000000000000000000000002", "label": "example - Base rotation whale" }
+  ],
+  "x_handles": [
+    "example_analyst",
+    "example_onchain"
+  ]
+}
