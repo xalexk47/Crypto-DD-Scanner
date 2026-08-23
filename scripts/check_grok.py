@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import config  # noqa: E402
-from src.mindshare import MINDSHARE_SYSTEM_PROMPT, GrokMindshareClient  # noqa: E402
+from src.mindshare import GrokMindshareClient  # noqa: E402
 from src.models import TokenSnapshot  # noqa: E402
 
 OK, BAD, INFO = "  ✅", "  ❌", "  •"
@@ -139,37 +139,39 @@ def main() -> int:
         print(f"{BAD} This openai SDK has no .responses endpoint. Fix: pip install -U openai")
         return 2
 
-    print(f"{INFO} This runs a real agentic search — expect 30-120 seconds per")
-    print(f"{INFO}   shape while Grok searches X. Do not interrupt it.")
+    print(f"{INFO} Phase A validates each payload SHAPE with a short timeout.")
+    print(f"{INFO}   A shape error comes back instantly; a timeout means the server")
+    print(f"{INFO}   ACCEPTED the shape and is busy searching — which is a pass here.")
 
     grok = GrokMindshareClient()
     variants = grok.search_tool_variants(config.X_SEARCH_WINDOW_HOURS)
+
+    def is_timeout(exc: Exception) -> bool:
+        return "timed out" in str(exc).lower() or type(exc).__name__ == "APITimeoutError"
+
+    # Phase A -- shape validation only. max_retries=0 so a timeout is not
+    # silently re-run (each retry re-runs the search and bills for it).
+    probe = OpenAI(api_key=key, base_url=config.XAI_BASE_URL, timeout=10, max_retries=0)
     accepted = None
-    # A search needs far longer than the 60s used for the quick checks above.
-    search_client = OpenAI(
-        api_key=key, base_url=config.XAI_BASE_URL,
-        timeout=config.X_SEARCH_TIMEOUT_SECONDS, max_retries=1,
-    )
     for index, tool in enumerate(variants, start=1):
         shape = json.dumps(tool)
-        label = shape if len(shape) <= 88 else shape[:85] + "..."
-        print(f"{INFO} trying shape {index}/{len(variants)}: {label}", flush=True)
+        label = shape if len(shape) <= 84 else shape[:81] + "..."
+        print(f"{INFO} shape {index}/{len(variants)}: {label}", flush=True)
         started = time.monotonic()
         try:
-            response = search_client.responses.create(
+            probe.responses.create(
                 model=config.X_SEARCH_MODEL,
-                input=[
-                    {"role": "system", "content": MINDSHARE_SYSTEM_PROMPT},
-                    {"role": "user", "content": "Search X for posts about $BRETT on Base in the last 24 hours."},
-                ],
+                input=[{"role": "user", "content": "Search X for one recent post about $BRETT."}],
                 tools=[tool],
             )
-            text = (grok._responses_text(response) or "").strip()
-            print(f"{OK} shape {index} ACCEPTED in {time.monotonic() - started:.0f}s")
-            print(f"{INFO} Answer began: {text[:200]}")
+            print(f"{OK} shape {index} ACCEPTED (answered in {time.monotonic() - started:.0f}s)")
             accepted = tool
             break
         except Exception as exc:
+            if is_timeout(exc):
+                print(f"{OK} shape {index} ACCEPTED — server took the request and is searching")
+                accepted = tool
+                break
             reason = str(exc)
             if "Failed to deserialize" in reason:
                 reason = reason.split("Failed to deserialize the JSON body into the target type:")[-1].strip()
@@ -179,12 +181,15 @@ def main() -> int:
     if accepted is None:
         print(f"{BAD} No x_search payload shape was accepted.")
         print(f"{INFO} The app still works — it falls back to a clearly labelled non-live answer.")
-        print(f"{INFO} Paste this whole section back to Claude; the error text above names")
-        print(f"{INFO}   the fields the API does expect, which is enough to fix it.")
+        print(f"{INFO} Paste this whole section back to Claude; the errors above name the")
+        print(f"{INFO}   fields the API expects, which is enough to fix it.")
         return 2
 
+    print(f"\n{INFO} Phase B: running that shape for real. This is a full agentic")
+    print(f"{INFO}   search and can take 1-4 minutes. Do not interrupt it.", flush=True)
+
     # 6. the real thing ---------------------------------------------------
-    print("\n6. Full mindshare fetch through the app's own code path")
+    print("\n6. Full mindshare fetch through the app's own code path", flush=True)
     snapshot = TokenSnapshot(
         address="0x532f27101965dd16442E59d40670FaF5eBB142E4",
         chain="base", name="Based Brett", symbol="BRETT",
