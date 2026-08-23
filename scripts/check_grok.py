@@ -26,6 +26,44 @@ from src.models import TokenSnapshot  # noqa: E402
 OK, BAD, INFO = "  ✅", "  ❌", "  •"
 
 
+def explain(exc: Exception) -> list:
+    """Turn a vendor exception into advice that fits the actual failure.
+
+    Getting this wrong is worse than saying nothing: a billing error reported
+    as "your key is wrong" sends people to regenerate a perfectly good key.
+    """
+    status = getattr(exc, "status_code", None)
+    text = str(exc).lower()
+    lines = []
+
+    if status == 401 or "invalid_api_key" in text or "incorrect api key" in text:
+        lines += [
+            f"{INFO} The key itself was rejected — wrong, revoked, or truncated.",
+            f"{INFO} Generate a fresh one at https://console.x.ai/ and update .env.",
+        ]
+    elif status == 403 or "credit" in text or "permission-denied" in text or "license" in text:
+        lines += [
+            f"{INFO} Your key is VALID — this is a billing/permission problem, not auth.",
+            f"{INFO} The xAI team this key belongs to has no credits or licenses yet.",
+            f"{INFO} Open the console URL in the error above and add credits to THAT team.",
+            f"{INFO} Watch out: sign-up credits often sit on a different team than a",
+            f"{INFO}   newly created one. If you have more than one team, either add",
+            f"{INFO}   credits here or make a new key under the team that has them.",
+            f"{INFO} Everything else in this app works without Grok — the ensemble and",
+            f"{INFO}   X mindshare are optional layers on top.",
+        ]
+    elif status == 429 or "rate limit" in text:
+        lines += [f"{INFO} Rate limited. Wait a moment and re-run this script."]
+    elif status == 404 or "does not exist" in text or "not found" in text:
+        lines += [
+            f"{INFO} The model id was not recognised by your account.",
+            f"{INFO} Use one of the ids listed in step 3 and set it in .env.",
+        ]
+    else:
+        lines += [f"{INFO} Unexpected failure — paste this output back to Claude."]
+    return lines
+
+
 def main() -> int:
     print("\nMemeDD — Grok / xAI connection check")
     print("=" * 52)
@@ -62,7 +100,8 @@ def main() -> int:
             print(f"{INFO} {model_id}")
     except Exception as exc:
         print(f"{BAD} Could not list models: {type(exc).__name__}: {exc}")
-        print(f"{INFO} An auth error here means the key is wrong or revoked.")
+        for line in explain(exc):
+            print(line)
         return 1
 
     for label, configured in (("ensemble", config.XAI_MODEL), ("X search", config.X_SEARCH_MODEL)):
@@ -86,6 +125,8 @@ def main() -> int:
         print(f"{OK} Replied: {response.choices[0].message.content!r}")
     except Exception as exc:
         print(f"{BAD} {type(exc).__name__}: {exc}")
+        for line in explain(exc):
+            print(line)
         return 1
 
     # 5. the server-side X search tool ------------------------------------
@@ -107,6 +148,8 @@ def main() -> int:
         print(f"     {text[:200]}")
     except Exception as exc:
         print(f"{BAD} {type(exc).__name__}: {exc}")
+        for line in explain(exc):
+            print(line)
         print(f"{INFO} The app falls back to a non-live answer, clearly labelled.")
         print(f"{INFO} If the tool name or model is wrong, set MEMEDD_X_SEARCH_TOOL /")
         print(f"{INFO} MEMEDD_X_SEARCH_MODEL in .env — no code change needed.")
