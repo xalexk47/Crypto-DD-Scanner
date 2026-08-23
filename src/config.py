@@ -237,6 +237,13 @@ CACHE_TTL_MINDSHARE = int(os.getenv("MEMEDD_CACHE_TTL_MINDSHARE", "900"))
 # Share of the momentum pillar given to social mindshare when it is available.
 MINDSHARE_WEIGHT_IN_MOMENTUM = float(os.getenv("MEMEDD_MINDSHARE_WEIGHT", "0.3"))
 
+# A server-side x_search call is an agentic loop -- xAI analyses the query,
+# runs searches, reads results and may search again before answering. That
+# routinely takes far longer than a plain completion, so it gets its own,
+# much longer budget. Timing it out at the normal 75s would fail a call that
+# was about to succeed, and bill for the work either way.
+X_SEARCH_TIMEOUT_SECONDS = float(os.getenv("MEMEDD_X_SEARCH_TIMEOUT", "240"))
+
 LLM_TIMEOUT_SECONDS = float(os.getenv("MEMEDD_LLM_TIMEOUT", "75"))
 LLM_MAX_TOKENS = int(os.getenv("MEMEDD_LLM_MAX_TOKENS", "16000"))
 # Low temperature: we want reproducible scoring, not creative writing.

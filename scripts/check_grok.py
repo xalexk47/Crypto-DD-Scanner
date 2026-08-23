@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -138,14 +139,24 @@ def main() -> int:
         print(f"{BAD} This openai SDK has no .responses endpoint. Fix: pip install -U openai")
         return 2
 
+    print(f"{INFO} This runs a real agentic search — expect 30-120 seconds per")
+    print(f"{INFO}   shape while Grok searches X. Do not interrupt it.")
+
     grok = GrokMindshareClient()
     variants = grok.search_tool_variants(config.X_SEARCH_WINDOW_HOURS)
     accepted = None
+    # A search needs far longer than the 60s used for the quick checks above.
+    search_client = OpenAI(
+        api_key=key, base_url=config.XAI_BASE_URL,
+        timeout=config.X_SEARCH_TIMEOUT_SECONDS, max_retries=1,
+    )
     for index, tool in enumerate(variants, start=1):
         shape = json.dumps(tool)
         label = shape if len(shape) <= 88 else shape[:85] + "..."
+        print(f"{INFO} trying shape {index}/{len(variants)}: {label}", flush=True)
+        started = time.monotonic()
         try:
-            response = client.responses.create(
+            response = search_client.responses.create(
                 model=config.X_SEARCH_MODEL,
                 input=[
                     {"role": "system", "content": MINDSHARE_SYSTEM_PROMPT},
@@ -154,7 +165,7 @@ def main() -> int:
                 tools=[tool],
             )
             text = (grok._responses_text(response) or "").strip()
-            print(f"{OK} shape {index} ACCEPTED: {label}")
+            print(f"{OK} shape {index} ACCEPTED in {time.monotonic() - started:.0f}s")
             print(f"{INFO} Answer began: {text[:200]}")
             accepted = tool
             break
@@ -162,7 +173,7 @@ def main() -> int:
             reason = str(exc)
             if "Failed to deserialize" in reason:
                 reason = reason.split("Failed to deserialize the JSON body into the target type:")[-1].strip()
-            print(f"{BAD} shape {index} rejected: {label}")
+            print(f"{BAD} shape {index} rejected after {time.monotonic() - started:.0f}s")
             print(f"     {reason[:240]}")
 
     if accepted is None:

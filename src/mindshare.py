@@ -317,7 +317,7 @@ class GrokMindshareClient:
         self.api_key = api_key or config.XAI_API_KEY
         self.model = model or config.X_SEARCH_MODEL
         self.base_url = base_url or config.XAI_BASE_URL
-        self.timeout = timeout if timeout is not None else config.LLM_TIMEOUT_SECONDS
+        self.timeout = timeout if timeout is not None else config.X_SEARCH_TIMEOUT_SECONDS
         self._injected_client = client
 
     # -- availability ---------------------------------------------------
@@ -342,7 +342,15 @@ class GrokMindshareClient:
             return self._injected_client
         from openai import OpenAI
 
-        return OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=self.timeout)
+        # max_retries=1: the SDK retries timeouts by default, and re-running an
+        # agentic search costs both minutes and money for a call that is
+        # unlikely to behave differently the second time.
+        return OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.timeout,
+            max_retries=1,
+        )
 
     # -- the tool definition --------------------------------------------
     def search_tool_variants(self, window_hours: int) -> List[Dict[str, Any]]:
