@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Swing Desk — Meme Journal &amp; PnL</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --bg2: #12151c;
+    --card: #171b24;
+    --line: #2a3140;
+    --text: #e8edf5;
+    --muted: #8b95a8;
+    --accent: #d4a017;
+    --green: #3dcf8e;
+    --red: #ef6b6b;
+    --blue: #7aa2ff;
+    --probe: #9b8cff;
+    --core: #d4a017;
+    --rot: #5ec8c5;
+    --radius: 14px;
+    --shadow: 0 10px 30px rgba(0,0,0,.28);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+    background:
+      radial-gradient(1200px 500px at 10% -10%, rgba(212,160,23,.08), transparent 50%),
+      radial-gradient(900px 400px at 100% 0%, rgba(94,200,197,.06), transparent 45%),
+      var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  header {
+    position: sticky; top: 0; z-index: 20;
+    backdrop-filter: blur(14px);
+    background: rgba(11,13,18,.82);
+    border-bottom: 1px solid var(--line);
+    padding: 14px 18px;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .02em; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
+  nav { display: flex; gap: 6px; flex-wrap: wrap; }
+  nav button, .btn, select, input, textarea {
+    font: inherit; color: var(--text);
+  }
+  nav button {
+    background: transparent; border: 1px solid transparent; color: var(--muted);
+    padding: 8px 10px; border-radius: 10px; cursor: pointer;
+  }
+  nav button.active, nav button:hover { color: var(--text); background: var(--card); border-color: var(--line); }
+  main { max-width: 1180px; margin: 0 auto; padding: 18px; }
+  .grid { display: grid; gap: 14px; }
+  .stats { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+  .card {
+    background: linear-gradient(180deg, rgba(255,255,255,.02), transparent 40%), var(--card);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 16px; box-shadow: var(--shadow);
+  }
+  .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+  .value { font-size: 26px; font-weight: 700; margin-top: 6px; }
+  .pos { color: var(--green); } .neg { color: var(--red); }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+  .field { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 140px; }
+  label { font-size: 12px; color: var(--muted); }
+  input, select, textarea {
+    background: var(--bg2); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; outline: none;
+  }
+  textarea { min-height: 90px; resize: vertical; }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+  .btn {
+    background: var(--accent); color: #16120a; border: 0; border-radius: 10px;
+    padding: 10px 14px; font-weight: 700; cursor: pointer;
+  }
+  .btn.secondary { background: var(--bg2); color: var(--text); border: 1px solid var(--line); }
+  .btn.danger { background: #5a2424; color: #ffd4d4; }
+  .btn.small { padding: 7px 10px; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-size: 12px; font-weight: 600; }
+  .pill {
+    display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 700;
+    background: #222; color: var(--muted); border: 1px solid var(--line);
+  }
+  .pill.core { color: #201800; background: var(--core); border: 0; }
+  .pill.rotation { color: #062221; background: var(--rot); border: 0; }
+  .pill.probe { color: #160e33; background: var(--probe); border: 0; }
+  .pill.open { color: #06301c; background: var(--green); border: 0; }
+  .pill.closed { color: var(--muted); }
+  .check { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; font-size: 14px; color: #c9d2e1; }
+  .muted { color: var(--muted); }
+  .split { display: grid; grid-template-columns: 1.15fr .85fr; gap: 14px; }
+  @media (max-width: 900px) { .split { grid-template-columns: 1fr; } header { flex-direction: column; align-items: flex-start; } }
+  .hidden { display: none !important; }
+  .list-item { border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 10px; background: var(--bg2); }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  h2 { margin: 0 0 12px; font-size: 18px; }
+  h3 { margin: 0 0 8px; font-size: 15px; }
+  .empty { color: var(--muted); padding: 24px 8px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="dot"></span> Swing Desk</div>
+  <nav id="nav"></nav>
+</header>
+<main id="app"></main>
+<script>
+const TABS = [
+  ["dash", "Dashboard"],
+  ["trade", "New trade"],
+  ["pos", "Positions"],
+  ["watch", "Watchlist"],
+  ["journal", "Journal"],
+  ["calc", "PnL calc"],
+  ["review", "Weekly review"],
+  ["settings", "Settings"]
+];
+const CHAINS = ["Solana","BNB","Base","Ethereum","Robinhood","Other"];
+const BUCKETS = ["core","rotation","probe"];
+const KEY = "swingdesk.v1";
+
+const uid = () => crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random();
+const money = n => (n < 0 ? "-" : "") + "$" + Math.abs(n || 0).toLocaleString(undefined,{maximumFractionDigits:2});
+const pct = n => (n * 100).toFixed(1) + "%";
+const today = () => new Date().toISOString().slice(0,10);
+const num = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function blank() {
+  return {
+    settings: { startingCapital: 10000, accountName: "Meme swing book" },
+    positions: [],
+    watchlist: [],
+    journal: [],
+    reviews: []
+  };
+}
+function load() {
+  try { return Object.assign(blank(), JSON.parse(localStorage.getItem(KEY) || "{}")); }
+  catch { return blank(); }
+}
+function save() { localStorage.setItem(KEY, JSON.stringify(state)); }
+let state = load();
+let tab = "dash";
+let editId = null;
+
+function posMetrics(p) {
+  const all = Array.isArray(p.fills) ? p.fills : [];
+  const buys = all.filter(f => f.side === "buy");
+  const sells = all.filter(f => f.side === "sell");
+  const spent = buys.reduce((a,f) => a + f.usd + (f.fee||0), 0);
+  const bought = buys.reduce((a,f) => a + f.tokens, 0);
+  const proceeds = sells.reduce((a,f) => a + f.usd - (f.fee||0), 0);
+  const sold = sells.reduce((a,f) => a + f.tokens, 0);
+  const remaining = Math.max(bought - sold, 0);
+  const avg = bought ? spent / bought : 0;
+  const mtm = remaining * (p.mark || 0);
+  const realized = proceeds - (sold * avg);
+  const unrealized = mtm - (remaining * avg);
+  const total = realized + unrealized;
+  const costBasisOpen = remaining * avg;
+  return { spent, bought, proceeds, sold, remaining, avg, mtm, realized, unrealized, total, costBasisOpen };
+}
+function bookMetrics() {
+  let realized = 0, unrealized = 0, openRisk = 0, closed = 0, wins = 0;
+  state.positions.forEach(p => {
+    const m = posMetrics(p);
+    realized += m.realized;
+    unrealized += m.unrealized;
+    if (p.status === "open") openRisk += m.costBasisOpen;
+    else {
+      closed++;
+      if (m.realized > 0) wins++;
+    }
+  });
+  return { realized, unrealized, total: realized + unrealized, openRisk, closed, wins, winRate: closed ? wins/closed : 0 };
+}
+
+function nav() {
+  document.getElementById("nav").innerHTML = TABS.map(([id,label]) =>
+    `<button data-tab="${id}" class="${tab===id?"active":""}">${label}</button>`
+  ).join("");
+  document.getElementById("nav").onclick = e => {
+    const b = e.target.closest("button"); if (!b) return;
+    tab = b.dataset.tab;
+    editId = null;
+    render();
+  };
+}
+
+function field(label, name, val, type="text", extra="") {
+  return `<div class="field"><label>${label}</label><input ${extra} type="${type}" name="${name}" value="${esc(val)}"></div>`;
+}
+function area(label, name, val) {
+  return `<div class="field" style="min-width:100%"><label>${label}</label><textarea name="${name}">${esc(val)}</textarea></div>`;
+}
+function sel(label, name, opts, val) {
+  return `<div class="field"><label>${label}</label><select name="${name}">${
+    opts.map(o => `<option value="${esc(o)}" ${o===val?"selected":""}>${esc(o)}</option>`).join("")
+  }</select></div>`;
+}
+
+function renderDash() {
+  const m = bookMetrics();
+  const open = state.positions.filter(p => p.status === "open");
+  const recent = [...state.journal].sort((a,b)=>String(b.date).localeCompare(String(a.date))).slice(0,5);
+  return `
+    <div class="grid stats">
+      <div class="card"><div class="label">Total PnL</div><div class="value ${m.total>=0?"pos":"neg"}">${money(m.total)}</div></div>
+      <div class="card"><div class="label">Realized</div><div class="value ${m.realized>=0?"pos":"neg"}">${money(m.realized)}</div></div>
+      <div class="card"><div class="label">Unrealized</div><div class="value ${m.unrealized>=0?"pos":"neg"}">${money(m.unrealized)}</div></div>
+      <div class="card"><div class="label">Open cost basis</div><div class="value">${money(m.openRisk)}</div></div>
+      <div class="card"><div class="label">Closed win rate</div><div class="value">${pct(m.winRate)}</div><div class="muted">${m.wins}/${m.closed} closed winners</div></div>
+      <div class="card"><div class="label">Starting capital</div><div class="value">${money(state.settings.startingCapital)}</div><div class="muted">${pct(m.total / (state.settings.startingCapital||1))} vs start</div></div>
+    </div>
+    <div class="split" style="margin-top:14px">
+      <div class="card">
+        <h2>Open book</h2>
+        ${open.length ? `<table><thead><tr><th>Ticker</th><th>Bucket</th><th>Avg</th><th>Mark</th><th>Open PnL</th></tr></thead><tbody>
+          ${open.map(p => {
+            const x = posMetrics(p);
+            return `<tr>
+              <td><b>${esc(p.ticker)}</b><div class="muted">${esc(p.chain)}</div></td>
+              <td><span class="pill ${esc(p.bucket)}">${esc(p.bucket)}</span></td>
+              <td>${x.avg ? x.avg.toPrecision(4) : "—"}</td>
+              <td>${p.mark ? esc(p.mark) : "—"}</td>
+              <td class="${x.total>=0?"pos":"neg"}">${money(x.total)}</td>
+            </tr>`;
+          }).join("")}
+        </tbody></table>` : `<div class="empty">No open positions. Log a thesis in New trade.</div>`}
+      </div>
+      <div class="card">
+        <h2>Pre-buy checklist</h2>
+        <div class="muted">Use this before every click. Unchecked boxes = probe size only.</div>
+        <div class="check">☐ One-sentence story a stranger would repeat</div>
+        <div class="check">☐ Historical analog + why this can close part of the gap</div>
+        <div class="check">☐ Next buyers named (chain / app / listing / rotation)</div>
+        <div class="check">☐ Chain is early or mid, not finished</div>
+        <div class="check">☐ Scale-in and invalidation written</div>
+        <div class="check">☐ Size survives a 50% dump</div>
+        <div class="check">☐ Not buying only because the candle is green</div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h2>Latest journal</h2>
+      ${recent.length ? recent.map(j => `<div class="list-item"><b>${esc(j.date)}</b> · ${esc(j.type)}${j.ticker? " · "+esc(j.ticker):""}<div>${esc(j.body)}</div></div>`).join("") : `<div class="empty">No notes yet.</div>`}
+    </div>`;
+}
+
+function tradeForm(p) {
+  p = p || {
+    ticker:"", chain:"Solana", bucket:"probe", status:"open", mark:"",
+    story:"", analog:"", nextBuyer:"", invalidation:"", dipPlan:"", notes:"",
+    fills:[]
+  };
+  const fills = Array.isArray(p.fills) && p.fills.length ? p.fills : [null];
+  return `
+    <form id="tradeForm" class="grid">
+      <div class="card">
+        <h2>${editId ? "Edit position" : "New thesis / trade"}</h2>
+        <div class="row">
+          ${field("Ticker", "ticker", p.ticker)}
+          ${sel("Chain", "chain", CHAINS, p.chain)}
+          ${sel("Bucket", "bucket", BUCKETS, p.bucket)}
+          ${sel("Status", "status", ["open","closed"], p.status)}
+          ${field("Mark price", "mark", p.mark, "number", "step=any")}
+        </div>
+        ${area("One-sentence story", "story", p.story)}
+        ${area("Historical analog", "analog", p.analog)}
+        ${area("Next buyers / liquidity source", "nextBuyer", p.nextBuyer)}
+        ${area("Invalidation", "invalidation", p.invalidation)}
+        ${area("Dip plan (starter / add1 / add2)", "dipPlan", p.dipPlan)}
+        ${area("Notes", "notes", p.notes)}
+      </div>
+      <div class="card">
+        <h2>Fills</h2>
+        <div id="fills">${fills.map(f => fillRow(f || undefined)).join("")}</div>
+        <div class="actions" style="margin-top:10px">
+          <button type="button" class="btn secondary small" id="addFill">Add fill</button>
+          <button class="btn" type="submit">Save position</button>
+          ${editId ? `<button type="button" class="btn danger small" id="delPos">Delete</button>` : ""}
+        </div>
+      </div>
+    </form>`;
+}
+function fillRow(f={side:"buy", date:today(), price:"", usd:"", tokens:"", fee:"0"}) {
+  return `<div class="row fill">
+    <div class="field"><label>Side</label>
+      <select name="side"><option ${f.side==="buy"?"selected":""}>buy</option><option ${f.side==="sell"?"selected":""}>sell</option></select>
+    </div>
+    ${field("Date","date",f.date,"date")}
+    ${field("Price","price",f.price,"number","step=any")}
+    ${field("USD","usd",f.usd,"number","step=any")}
+    ${field("Tokens","tokens",f.tokens,"number","step=any")}
+    ${field("Fee USD","fee",f.fee,"number","step=any")}
+    <button type="button" class="btn secondary small rmFill">x</button>
+  </div>`;
+}
+
+function bindTrade() {
+  const form = document.getElementById("tradeForm");
+  document.getElementById("addFill").onclick = () => {
+    document.getElementById("fills").insertAdjacentHTML("beforeend", fillRow());
+    bindRm();
+  };
+  bindRm();
+  const del = document.getElementById("delPos");
+  if (del) del.onclick = () => {
+    if (!confirm("Delete this position?")) return;
+    state.positions = state.positions.filter(p => p.id !== editId);
+    editId = null; save(); tab = "pos"; render();
+  };
+  form.onsubmit = e => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const fills = [...form.querySelectorAll(".fill")].map(row => {
+      const g = n => row.querySelector(`[name="${n}"]`).value;
+      let tokens = num(g("tokens")), usd = num(g("usd")), price = num(g("price"));
+      if (!tokens && usd && price) tokens = usd / price;
+      if (!usd && tokens && price) usd = tokens * price;
+      return { side: g("side"), date: g("date"), price, usd, tokens, fee: num(g("fee")) };
+    });
+    const obj = {
+      id: editId || uid(),
+      ticker: String(fd.get("ticker") || "").toUpperCase().trim(),
+      chain: fd.get("chain"), bucket: fd.get("bucket"), status: fd.get("status"),
+      mark: num(fd.get("mark")),
+      story: fd.get("story"), analog: fd.get("analog"), nextBuyer: fd.get("nextBuyer"),
+      invalidation: fd.get("invalidation"), dipPlan: fd.get("dipPlan"), notes: fd.get("notes"),
+      fills, updatedAt: new Date().toISOString()
+    };
+    if (!obj.ticker) return alert("Ticker required");
+    const i = state.positions.findIndex(p => p.id === obj.id);
+    if (i >= 0) state.positions[i] = Object.assign(state.positions[i], obj);
+    else { obj.createdAt = obj.updatedAt; state.positions.push(obj); }
+    save(); editId = null; tab = "pos"; render();
+  };
+}
+function bindRm() {
+  document.querySelectorAll(".rmFill").forEach(b => b.onclick = () => {
+    if (document.querySelectorAll(".fill").length === 1) return;
+    b.closest(".fill").remove();
+  });
+}
+
+function renderPos() {
+  if (!state.positions.length) return `<div class="card empty">No positions yet.</div>`;
+  return `<div class="card"><h2>Positions</h2>
+    <table><thead><tr><th>Ticker</th><th>Thesis</th><th>Size</th><th>PnL</th><th></th></tr></thead><tbody>
+    ${[...state.positions].reverse().map(p => {
+      const m = posMetrics(p);
+      return `<tr>
+        <td><b>${esc(p.ticker)}</b><div class="muted">${esc(p.chain)}</div>
+          <span class="pill ${esc(p.bucket)}">${esc(p.bucket)}</span>
+          <span class="pill ${esc(p.status)}">${esc(p.status)}</span>
+        </td>
+        <td>${esc(p.story || "—")}<div class="muted">${esc(p.nextBuyer || "")}</div></td>
+        <td>Rem ${m.remaining.toLocaleString(undefined,{maximumFractionDigits:4})}<div class="muted">Avg ${m.avg ? m.avg.toPrecision(4) : "—"} · Mark ${p.mark ? esc(p.mark) : "—"}</div></td>
+        <td class="${m.total>=0?"pos":"neg"}">${money(m.total)}<div class="muted">R ${money(m.realized)} / U ${money(m.unrealized)}</div></td>
+        <td class="actions">
+          <button class="btn secondary small" data-edit="${esc(p.id)}">Edit</button>
+          ${p.status==="open"?`<button class="btn secondary small" data-mark="${esc(p.id)}">Set mark</button>`:""}
+        </td>
+      </tr>`;
+    }).join("")}
+    </tbody></table></div>`;
+}
+
+function renderWatch() {
+  return `<div class="split">
+    <div class="card">
+      <h2>Add watch</h2>
+      <form id="watchForm" class="grid">
+        <div class="row">
+          ${field("Ticker","ticker")}
+          ${sel("Chain","chain",CHAINS,"Solana")}
+          ${field("Narrative tag","tag")}
+        </div>
+        ${area("Why it might work / analog","why")}
+        ${area("What would make you size it","trigger")}
+        <button class="btn">Save to watchlist</button>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Watchlist</h2>
+      ${state.watchlist.length ? state.watchlist.map(w => `
+        <div class="list-item">
+          <b>${esc(w.ticker)}</b> · ${esc(w.chain)} ${w.tag? "· "+esc(w.tag):""}
+          <div>${esc(w.why)}</div>
+          <div class="muted">Trigger: ${esc(w.trigger)}</div>
+          <button class="btn danger small" data-delw="${esc(w.id)}">Remove</button>
+        </div>`).join("") : `<div class="empty">Park names here before they have volume.</div>`}
+    </div>
+  </div>`;
+}
+
+function renderJournal() {
+  return `<div class="split">
+    <div class="card">
+      <h2>New note</h2>
+      <form id="journalForm">
+        <div class="row">
+          ${field("Date","date",today(),"date")}
+          ${sel("Type","type",["observation","thesis update","emotion","chain flow","mistake","win review"],"observation")}
+          ${field("Ticker (optional)","ticker")}
+        </div>
+        ${area("Note","body")}
+        <button class="btn">Save note</button>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Log</h2>
+      ${[...state.journal].sort((a,b)=>String(b.date).localeCompare(String(a.date))).map(j => `
+        <div class="list-item">
+          <b>${esc(j.date)}</b> · ${esc(j.type)} ${j.ticker? "· "+esc(j.ticker):""}
+          <div>${esc(j.body)}</div>
+          <button class="btn danger small" data-delj="${esc(j.id)}">Delete</button>
+        </div>`).join("") || `<div class="empty">Write why you bought, not just what you bought.</div>`}
+    </div>
+  </div>`;
+}
+
+function renderCalc() {
+  return `<div class="split">
+    <div class="card">
+      <h2>What-if / scale-in calculator</h2>
+      <form id="calcForm">
+        <div class="row">
+          ${field("Starter USD","sUsd","500","number","step=any")}
+          ${field("Starter price","sPx","","number","step=any")}
+        </div>
+        <div class="row">
+          ${field("Add 1 USD","a1Usd","700","number","step=any")}
+          ${field("Add 1 price","a1Px","","number","step=any")}
+        </div>
+        <div class="row">
+          ${field("Add 2 USD","a2Usd","800","number","step=any")}
+          ${field("Add 2 price","a2Px","","number","step=any")}
+        </div>
+        <div class="row">
+          ${field("Exit / mark price","ex","","number","step=any")}
+          ${field("Account capital","cap", state.settings.startingCapital, "number","step=any")}
+        </div>
+        <button class="btn">Calculate</button>
+      </form>
+    </div>
+    <div class="card" id="calcOut"><div class="empty">Enter prices to see average cost, size vs capital, and PnL at mark.</div></div>
+  </div>`;
+}
+
+function renderReview() {
+  return `<div class="split">
+    <div class="card">
+      <h2>Weekly review</h2>
+      <form id="revForm">
+        ${field("Week of","week",today(),"date")}
+        ${area("What worked","worked")}
+        ${area("What failed (chase vs broken thesis)","failed")}
+        ${area("Did I buy planned dips or average losers?","dips")}
+        ${area("One process change next week","change")}
+        <button class="btn">Save review</button>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Past reviews</h2>
+      ${[...state.reviews].reverse().map(r => `
+        <div class="list-item">
+          <b>${esc(r.week)}</b>
+          <div><span class="muted">Worked:</span> ${esc(r.worked)}</div>
+          <div><span class="muted">Failed:</span> ${esc(r.failed)}</div>
+          <div><span class="muted">Dips:</span> ${esc(r.dips)}</div>
+          <div><span class="muted">Change:</span> ${esc(r.change)}</div>
+        </div>`).join("") || `<div class="empty">Do this every Sunday. One change only.</div>`}
+    </div>
+  </div>`;
+}
+
+function renderSettings() {
+  return `<div class="card">
+    <h2>Settings &amp; backup</h2>
+    <form id="setForm" class="row">
+      ${field("Desk name","accountName", state.settings.accountName)}
+      ${field("Starting capital USD","startingCapital", state.settings.startingCapital, "number","step=any")}
+      <button class="btn">Save settings</button>
+    </form>
+    <div class="actions" style="margin-top:16px">
+      <button class="btn secondary" id="exp">Export backup JSON</button>
+      <label class="btn secondary">Import backup<input id="imp" type="file" accept="application/json" class="hidden"></label>
+      <button class="btn danger" id="wipe">Wipe local data</button>
+    </div>
+    <p class="muted">This page does not send data anywhere. Back up the JSON file. Clearing browser data will erase the journal unless you exported.</p>
+  </div>`;
+}
+
+function render() {
+  nav();
+  const app = document.getElementById("app");
+  app.onclick = null;
+  if (tab==="dash") app.innerHTML = renderDash();
+  if (tab==="trade") {
+    const p = editId ? state.positions.find(x => x.id===editId) : null;
+    app.innerHTML = tradeForm(p); bindTrade();
+  }
+  if (tab==="pos") {
+    app.innerHTML = renderPos();
+    app.onclick = e => {
+      if (e.target.dataset.edit) { editId = e.target.dataset.edit; tab="trade"; render(); }
+      if (e.target.dataset.mark) {
+        const p = state.positions.find(x => x.id===e.target.dataset.mark);
+        const v = prompt("Mark price for " + p.ticker, p.mark || "");
+        if (v==null) return;
+        p.mark = num(v); save(); render();
+      }
+    };
+  }
+  if (tab==="watch") {
+    app.innerHTML = renderWatch();
+    document.getElementById("watchForm").onsubmit = e => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      state.watchlist.unshift({
+        id: uid(), ticker: String(fd.get("ticker")||"").toUpperCase(),
+        chain: fd.get("chain"), tag: fd.get("tag"), why: fd.get("why"), trigger: fd.get("trigger")
+      });
+      save(); render();
+    };
+    app.onclick = e => {
+      if (e.target.dataset.delw) {
+        state.watchlist = state.watchlist.filter(w => w.id !== e.target.dataset.delw);
+        save(); render();
+      }
+    };
+  }
+  if (tab==="journal") {
+    app.innerHTML = renderJournal();
+    document.getElementById("journalForm").onsubmit = e => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      state.journal.unshift({
+        id: uid(), date: fd.get("date"), type: fd.get("type"),
+        ticker: String(fd.get("ticker")||"").toUpperCase(), body: fd.get("body")
+      });
+      save(); render();
+    };
+    app.onclick = e => {
+      if (e.target.dataset.delj) {
+        state.journal = state.journal.filter(j => j.id !== e.target.dataset.delj);
+        save(); render();
+      }
+    };
+  }
+  if (tab==="calc") {
+    app.innerHTML = renderCalc();
+    document.getElementById("calcForm").onsubmit = e => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const legs = [
+        [num(fd.get("sUsd")), num(fd.get("sPx"))],
+        [num(fd.get("a1Usd")), num(fd.get("a1Px"))],
+        [num(fd.get("a2Usd")), num(fd.get("a2Px"))]
+      ].filter(([usd,px]) => usd && px);
+      const spent = legs.reduce((a,[usd]) => a+usd, 0);
+      const tokens = legs.reduce((a,[usd,px]) => a + usd/px, 0);
+      const avg = tokens ? spent/tokens : 0;
+      const ex = num(fd.get("ex"));
+      const cap = num(fd.get("cap")) || 1;
+      const value = tokens * (ex || 0);
+      const pnl = value - spent;
+      document.getElementById("calcOut").innerHTML = `
+        <h2>Result</h2>
+        <div class="label">Total deployed</div><div class="value">${money(spent)}</div>
+        <p>${pct(spent/cap)} of capital</p>
+        <p>Tokens: ${tokens.toLocaleString(undefined,{maximumFractionDigits:6})}</p>
+        <p>Average cost: ${avg ? avg.toPrecision(6) : "—"}</p>
+        <p>Value at mark: ${money(value)}</p>
+        <p class="${pnl>=0?"pos":"neg"}">PnL: ${money(pnl)} (${spent?pct(pnl/spent):"n/a"})</p>
+        ${avg ? `<p class="muted">A 50% dump from avg ${avg.toPrecision(4)} is ${(avg*0.5).toPrecision(4)}. Size so that loss is survivable.</p>` : ""}`;
+    };
+  }
+  if (tab==="review") {
+    app.innerHTML = renderReview();
+    document.getElementById("revForm").onsubmit = e => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      state.reviews.push({
+        id: uid(), week: fd.get("week"), worked: fd.get("worked"),
+        failed: fd.get("failed"), dips: fd.get("dips"), change: fd.get("change")
+      });
+      save(); render();
+    };
+  }
+  if (tab==="settings") {
+    app.innerHTML = renderSettings();
+    document.getElementById("setForm").onsubmit = e => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      state.settings.accountName = fd.get("accountName");
+      state.settings.startingCapital = num(fd.get("startingCapital"));
+      save(); render();
+    };
+    document.getElementById("exp").onclick = () => {
+      const blob = new Blob([JSON.stringify(state,null,2)], {type:"application/json"});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "swing-desk-backup.json";
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+    document.getElementById("imp").onchange = e => {
+      const file = e.target.files[0]; if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try { state = Object.assign(blank(), JSON.parse(reader.result)); save(); render(); }
+        catch { alert("Invalid backup file"); }
+      };
+      reader.readAsText(file);
+    };
+    document.getElementById("wipe").onclick = () => {
+      if (!confirm("Erase all local journal data?")) return;
+      state = blank(); save(); render();
+    };
+  }
+}
+render();
+</script>
+</body>
+</html>

@@ -489,8 +489,16 @@ src/
   utils.py              Formatting, address parsing, safe coercion, TTL cache
   scripts/check_grok.py Diagnose your Grok key, models and X search access
 tests/                  271 unit + end-to-end tests (network and LLMs stubbed)
+tools/swing_desk.html   Standalone swing-trade journal + PnL tracker (no build, no server)
 .streamlit/config.toml  Dark theme
 ```
+
+`tools/swing_desk.html` is a companion to the scanner rather than part of it: open the
+file directly in a browser and it gives you a pre-buy checklist, a thesis/fills log with
+realized and unrealized PnL, a watchlist, a trading journal, a scale-in calculator and a
+weekly review. Everything lives in that browser's `localStorage` — nothing is sent
+anywhere and no key is needed — so use **Settings → Export backup JSON** before clearing
+site data or switching machines.
 
 The data flow is one direction, with normalization at the boundary:
 
