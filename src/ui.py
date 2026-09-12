@@ -12,7 +12,8 @@ from typing import Any, Dict, Iterable, List, Optional
 import streamlit as st
 
 from . import config
-from .models import (AnalysisResult, EnsembleResult, MindshareReport, ScoreCard,
+from .models import (AnalysisResult, ChainHeat, EnsembleResult, MindshareReport,
+                     PortfolioSnapshot, Position, RotationPlan, ScoreCard,
                      SecurityReport, TokenProfile, TokenSnapshot, WalletFlowReport)
 from .utils import fmt_number, fmt_pct, fmt_usd, score_color, score_emoji, short_address
 
@@ -106,6 +107,20 @@ CUSTOM_CSS = """
 .mdd-post-meta { color: var(--mdd-muted); font-size: .74rem; margin-top: .3rem; }
 .mdd-live { background: #052e16; color: #22c55e; border-color: #22c55e55; }
 .mdd-stale { background: #2e2405; color: #eab308; border-color: #eab30855; }
+
+.mdd-chain-row { display: flex; align-items: center; gap: .6rem; margin: .35rem 0; }
+.mdd-chain-name { width: 8.5rem; font-size: .86rem; font-weight: 600; }
+.mdd-chain-val { color: var(--mdd-muted); font-size: .82rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.mdd-heat-card { background: var(--mdd-card); border: 1px solid var(--mdd-border); border-radius: 14px;
+                 padding: .9rem 1rem; margin-bottom: .8rem; }
+.mdd-heat-num { font-size: 2.1rem; font-weight: 800; line-height: 1; letter-spacing: -0.02em; }
+.mdd-action { border-left: 3px solid var(--mdd-border); background: var(--mdd-card);
+              border-radius: 0 12px 12px 0; padding: .65rem .9rem; margin-bottom: .55rem; }
+.mdd-action-head { font-weight: 700; font-size: .95rem; }
+.mdd-action-why { color: var(--mdd-muted); font-size: .82rem; margin-top: .25rem; line-height: 1.45; }
+.mdd-pnl-up { color: #22c55e; font-weight: 700; }
+.mdd-pnl-down { color: #ef4444; font-weight: 700; }
+.mdd-pnl-unk { color: var(--mdd-muted); font-weight: 500; }
 
 /* Phones: stop Streamlit metric labels wrapping into unreadable slivers. */
 @media (max-width: 640px) {
@@ -921,3 +936,321 @@ def disclaimer() -> None:
         'never risk money you cannot afford to lose entirely.</div>',
         unsafe_allow_html=True,
     )
+
+
+# --------------------------------------------------------------------------
+# Portfolio
+# --------------------------------------------------------------------------
+def _pnl_html(value: Optional[float], pct: Optional[float]) -> str:
+    """Colour a P&L figure, or say the basis is unknown rather than show zero."""
+    if value is None:
+        return '<span class="mdd-pnl-unk">basis unknown</span>'
+    css = "mdd-pnl-up" if value >= 0 else "mdd-pnl-down"
+    suffix = f" ({fmt_pct(pct, 1, signed=True)})" if pct is not None else ""
+    return f'<span class="{css}">{fmt_usd(value)}{suffix}</span>'
+
+
+def render_portfolio_summary(
+    snapshot: PortfolioSnapshot,
+    previous_total: Optional[float] = None,
+) -> None:
+    """Headline numbers for the whole book."""
+    total = snapshot.total_usd
+    known_basis = [p for p in snapshot.positions if p.cost_basis_usd is not None]
+    pnl = sum(p.unrealized_pnl_usd or 0.0 for p in known_basis) if known_basis else None
+    basis = sum(p.cost_basis_usd or 0.0 for p in known_basis) if known_basis else 0.0
+
+    col1, col2, col3, col4 = st.columns(4)
+    delta = None
+    if previous_total is not None and previous_total > 0:
+        change = total - previous_total
+        delta = f"{fmt_usd(change)} ({change / previous_total * 100:+.1f}%) since last sync"
+    col1.metric("Portfolio value", fmt_usd(total, compact=False), delta=delta)
+    col2.metric("Positions", f"{len(snapshot.positions)}")
+    col3.metric("Chains", f"{len(snapshot.by_chain())}")
+    if pnl is not None and basis > 0:
+        col4.metric("Unrealized P&L", fmt_usd(pnl), delta=f"{pnl / basis * 100:+.1f}%")
+    else:
+        # Never show a P&L of $0 when what we mean is "you have not told us
+        # what you paid".
+        col4.metric("Unrealized P&L", "—", help="Add an avg cost to a position to track P&L.")
+
+    if snapshot.dust_count:
+        st.caption(
+            f"Plus {snapshot.dust_count} dust position(s) worth {fmt_usd(snapshot.dust_usd)} "
+            f"(under ${config.PORTFOLIO_DUST_USD:,.0f} each), included in the total."
+        )
+
+
+def render_allocation(snapshot: PortfolioSnapshot, tag_rows: Optional[List[Dict[str, Any]]] = None) -> None:
+    """Where the money actually sits: by chain, and by ecosystem."""
+    total = snapshot.total_usd
+    if total <= 0:
+        return
+
+    left, right = st.columns(2, gap="large")
+    with left:
+        rows = ""
+        for chain, value in snapshot.by_chain().items():
+            pct = value / total * 100.0
+            label = config.get_chain(chain).label
+            rows += (
+                '<div class="mdd-chain-row">'
+                f'<span class="mdd-chain-name">{label}</span>'
+                '<span style="flex:1;"><span class="mdd-bar-track" '
+                'style="display:inline-block;width:100%;vertical-align:middle;">'
+                f'<span class="mdd-bar-fill" style="display:block;width:{pct:.1f}%;'
+                f'background:{score_color(min(pct * 2, 100))};height:9px;"></span>'
+                "</span></span>"
+                f'<span class="mdd-chain-val">{fmt_usd(value)} · {pct:.1f}%</span>'
+                "</div>"
+            )
+        st.markdown(
+            f'<div class="mdd-card"><h3>Allocation by chain</h3>{rows}</div>',
+            unsafe_allow_html=True,
+        )
+
+    with right:
+        if not tag_rows:
+            st.markdown(
+                '<div class="mdd-card"><h3>Ecosystem groups</h3>'
+                '<div class="mdd-note">Tag positions (e.g. "Brew") to roll an ecosystem '
+                "up into one line and watch it move together.</div></div>",
+                unsafe_allow_html=True,
+            )
+            return
+        rows = ""
+        for row in tag_rows:
+            change = row["change_24h"]
+            css = "mdd-pnl-up" if change >= 0 else "mdd-pnl-down"
+            rows += (
+                '<div class="mdd-kv">'
+                f'<span>{row["tag"]} <span class="mdd-note">· {row["positions"]} pos · '
+                f'{row["chains"]}</span></span>'
+                f'<span>{fmt_usd(row["value_usd"])} · {row["allocation_pct"]:.1f}% '
+                f'<span class="{css}">{change:+.1f}%</span></span>'
+                "</div>"
+            )
+        st.markdown(
+            f'<div class="mdd-card"><h3>Ecosystem groups (24h)</h3>{rows}</div>',
+            unsafe_allow_html=True,
+        )
+
+
+def render_position_detail(position: Position, allocation_pct: float) -> None:
+    """The per-position card shown when a row is expanded."""
+    snapshot = position.snapshot
+    rows = [
+        ("Quantity", fmt_number(position.quantity)),
+        ("Price", f"${position.price_usd:,.8f}".rstrip("0").rstrip(".") if position.price_usd else "n/a"),
+        ("Value", fmt_usd(position.value_usd)),
+        ("Allocation", f"{allocation_pct:.1f}% of portfolio"),
+        ("Unrealized P&L", _pnl_html(position.unrealized_pnl_usd, position.unrealized_pnl_pct)),
+        ("Avg cost", f"${position.avg_cost_usd:,.8f}".rstrip("0").rstrip(".")
+         if position.avg_cost_usd else "not set"),
+        ("Ecosystem", position.tag or "untagged"),
+        ("Wallets holding", str(len(position.wallets) or 1)),
+    ]
+    if snapshot:
+        rows.extend([
+            ("Market cap", fmt_usd(snapshot.market_cap)),
+            ("Liquidity", fmt_usd(snapshot.liquidity_usd)),
+            ("24h volume", fmt_usd(snapshot.volume_24h)),
+            ("Price 1h / 6h / 24h",
+             f"{snapshot.price_change_1h:+.1f}% · {snapshot.price_change_6h:+.1f}% · "
+             f"{snapshot.price_change_24h:+.1f}%"),
+            ("Your size vs pool",
+             fmt_pct(position.value_usd / snapshot.liquidity_usd * 100, 2)
+             if snapshot.liquidity_usd else "n/a"),
+        ])
+    body = "".join(f'<div class="mdd-kv"><span>{k}</span><span>{v}</span></div>' for k, v in rows)
+    st.markdown(f'<div class="mdd-card">{body}</div>', unsafe_allow_html=True)
+
+    if snapshot and snapshot.liquidity_usd and position.value_usd > snapshot.liquidity_usd * 0.02:
+        st.warning(
+            f"This position is {position.value_usd / snapshot.liquidity_usd * 100:.1f}% of the "
+            "whole pool — exiting it will move the price against you. Size any trim accordingly.",
+            icon="⚠️",
+        )
+
+
+def render_coverage_notes(snapshot: PortfolioSnapshot) -> None:
+    """Say which chains could not be read, so silence is never read as zero."""
+    for chain, note in snapshot.coverage_notes.items():
+        st.info(f"**{config.get_chain(chain).label}** — no positions read. {note}", icon="🔌")
+    for warning in snapshot.warnings:
+        st.caption(f"ℹ️ {warning}")
+    if snapshot.unpriced:
+        with st.expander(f"⚠️ {len(snapshot.unpriced)} holding(s) could not be priced"):
+            for item in snapshot.unpriced:
+                st.markdown(
+                    f"- **{item['symbol']}** on {config.get_chain(item['chain']).label} — "
+                    f"{fmt_number(item['quantity'])} tokens. {item['reason']}"
+                )
+
+
+# --------------------------------------------------------------------------
+# Rotation
+# --------------------------------------------------------------------------
+_HEAT_STATE_COLORS = {
+    "hot": "#ef4444",
+    "heating": "#f97316",
+    "cooling": "#38bdf8",
+    "cold": "#60a5fa",
+}
+
+
+def render_chain_heat(heat: ChainHeat) -> None:
+    """One chain's heat card: the number, the halves, and the inputs behind it."""
+    chain_cfg = config.get_chain(heat.chain)
+    color = _HEAT_STATE_COLORS.get(heat.state, "#8b98a9")
+    state_label = config.HEAT_STATE_LABELS.get(heat.state, heat.state)
+
+    if heat.confidence <= 0:
+        st.markdown(
+            f"""
+            <div class="mdd-heat-card">
+              <div class="mdd-model-head"><span class="mdd-model-name">{chain_cfg.label}</span>
+                <span class="mdd-badge">no data</span></div>
+              <div class="mdd-note">{' '.join(heat.notes) or 'No usable inputs for this chain.'}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    duration = f" · {heat.hours_in_state:.0f}h" if heat.hours_in_state else ""
+    trend = heat.trend
+    trend_html = (
+        f'<span class="{"mdd-pnl-up" if trend >= 0 else "mdd-pnl-down"}">{trend:+.0f} pts</span>'
+        if trend is not None else '<span class="mdd-pnl-unk">no trend yet</span>'
+    )
+    divergence = heat.divergence
+    divergence_html = ""
+    if divergence is not None and abs(divergence) >= config.HEAT_DIVERGENCE_THRESHOLD:
+        if divergence > 0:
+            divergence_html = (
+                f'<div class="mdd-note" style="margin-top:.4rem;">⚠️ Your holdings run '
+                f"<b>{divergence:.0f} pts hotter</b> than the chain — this is your tokens "
+                "moving, not the chain.</div>"
+            )
+        else:
+            divergence_html = (
+                f'<div class="mdd-note" style="margin-top:.4rem;">👀 The chain runs '
+                f"<b>{abs(divergence):.0f} pts hotter</b> than your holdings — it is moving "
+                "without you.</div>"
+            )
+
+    halves = (
+        f'<div class="mdd-kv"><span>Your bags</span><span>'
+        f'{f"{heat.portfolio_heat:.0f}/100 · {heat.position_count} pos" if heat.portfolio_heat is not None else "no positions here"}'
+        "</span></div>"
+        f'<div class="mdd-kv"><span>The chain</span><span>'
+        f'{f"{heat.market_heat:.0f}/100 · {heat.basket_size} tokens" if heat.market_heat is not None else "not available"}'
+        "</span></div>"
+        f'<div class="mdd-kv"><span>Trend vs recent</span><span>{trend_html}</span></div>'
+    )
+    if heat.dex_volume_24h:
+        halves += (
+            f'<div class="mdd-kv"><span>Chain DEX volume 24h</span>'
+            f"<span>{fmt_usd(heat.dex_volume_24h)}</span></div>"
+        )
+
+    st.markdown(
+        f"""
+        <div class="mdd-heat-card">
+          <div class="mdd-model-head">
+            <span class="mdd-model-name">{chain_cfg.label}</span>
+            <span class="mdd-badge" style="color:{color};border-color:{color}55;">
+              {state_label}{duration}</span>
+          </div>
+          <div class="mdd-heat-num" style="color:{color};">{heat.heat:.0f}
+            <span class="mdd-score-den">/100</span></div>
+          {halves}
+          {divergence_html}
+          <div class="mdd-note" style="margin-top:.45rem;">
+            Confidence {heat.confidence * 100:.0f}% · from {", ".join(heat.inputs_used) or "nothing"}
+            {"· missing: " + ", ".join(heat.missing_inputs) if heat.missing_inputs else ""}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_flow_ranking(heats: List[ChainHeat]) -> None:
+    """Hot → cold at a glance: where liquidity is, and where it is not."""
+    readable = [heat for heat in heats if heat.confidence > 0]
+    if not readable:
+        return
+    rows = ""
+    for heat in readable:
+        color = _HEAT_STATE_COLORS.get(heat.state, "#8b98a9")
+        rows += (
+            '<div class="mdd-chain-row">'
+            f'<span class="mdd-chain-name">{config.get_chain(heat.chain).label}</span>'
+            '<span style="flex:1;"><span class="mdd-bar-track" '
+            'style="display:inline-block;width:100%;vertical-align:middle;">'
+            f'<span class="mdd-bar-fill" style="display:block;width:{max(0, min(100, heat.heat)):.1f}%;'
+            f'background:{color};height:9px;"></span></span></span>'
+            f'<span class="mdd-chain-val">{heat.heat:.0f} · '
+            f'{config.HEAT_STATE_LABELS.get(heat.state, heat.state)}</span>'
+            "</div>"
+        )
+    st.markdown(
+        f'<div class="mdd-card"><h3>Liquidity flow — hot to cold</h3>{rows}'
+        '<div class="mdd-note" style="margin-top:.5rem;">Trim into the top of this list, '
+        "rotate toward the bottom.</div></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_rotation_plan(plan: RotationPlan) -> None:
+    """The actual moves, with the arithmetic shown."""
+    trims = plan.actions_of("trim")
+
+    if not plan.actions:
+        st.info(
+            "No moves suggested right now — nothing is far enough out of line to be worth "
+            "the spread. " + (" ".join(plan.notes) if plan.notes else ""),
+            icon="✅",
+        )
+    else:
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Suggested trims", f"{len(trims)}")
+        col2.metric("Proceeds to rotate", fmt_usd(plan.total_trim_usd))
+        col3.metric(
+            "Share of book",
+            f"{plan.total_trim_usd / plan.portfolio_usd * 100:.1f}%"
+            if plan.portfolio_usd else "n/a",
+        )
+
+    for action in plan.actions:
+        color = "#ef4444" if action.kind == "trim" else "#22c55e"
+        warnings = "".join(
+            f'<div class="mdd-note" style="color:#eab308;margin-top:.3rem;">⚠️ {warning}</div>'
+            for warning in action.warnings
+        )
+        st.markdown(
+            f"""
+            <div class="mdd-action" style="border-left-color:{color};">
+              <div class="mdd-action-head">{action.headline}
+                <span class="mdd-badge" style="margin-left:.4rem;">{fmt_usd(action.amount_usd)}</span>
+              </div>
+              <div class="mdd-action-why">{action.reason}</div>
+              {warnings}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    for note in plan.notes:
+        st.caption(f"💡 {note}")
+    for warning in plan.warnings:
+        st.caption(f"⚠️ {warning}")
+
+    if plan.actions:
+        st.caption(
+            "These are suggestions with the arithmetic shown, not instructions — the app "
+            "cannot and will not place a trade. Check each pool before you size a sell."
+        )

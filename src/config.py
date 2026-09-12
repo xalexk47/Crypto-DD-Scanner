@@ -436,3 +436,194 @@ class AppSettings:
 
     def risk(self) -> RiskProfile:
         return RISK_PROFILES.get(self.risk_profile, RISK_PROFILES[DEFAULT_RISK_PROFILE])
+
+
+# ==========================================================================
+# Portfolio: wallet balance providers
+# ==========================================================================
+# Balances are read straight off-chain, so no exchange or platform API is
+# involved and no key with spend authority is ever touched. Public JSON-RPC
+# endpoints need no key at all; they are listed here rather than hardcoded
+# because free endpoints rate-limit, go away, and get replaced.
+#
+# Robinhood Chain (Arbitrum Orbit, id 4663) deliberately ships with a blank
+# RPC default: publishing an unverified endpoint as though it were known-good
+# is worse than saying "not configured". Its Blockscout instance covers the
+# same ground without an RPC, and the UI names whichever provider is missing.
+EVM_RPC_URLS: Dict[str, str] = {
+    "base": os.getenv("BASE_RPC_URL", "https://mainnet.base.org"),
+    "ethereum": os.getenv("ETHEREUM_RPC_URL", "https://eth.llamarpc.com"),
+    "bsc": os.getenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org"),
+    "arbitrum": os.getenv("ARBITRUM_RPC_URL", "https://arb1.arbitrum.io/rpc"),
+    "robinhood": os.getenv("ROBINHOOD_RPC_URL", ""),
+}
+
+# Solana's public RPC works but throttles hard; a Helius/QuickNode URL dropped
+# in here behaves identically and survives a large wallet.
+SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+
+# Blockscout exposes `?module=account&action=tokenlist`, which returns every
+# token balance for a wallet in one unauthenticated call -- the discovery path
+# for chains Etherscan V2 does not index.
+BLOCKSCOUT_BASE_URLS: Dict[str, str] = {
+    "base": os.getenv("BASE_BLOCKSCOUT_URL", "https://base.blockscout.com"),
+    "robinhood": os.getenv("ROBINHOOD_BLOCKSCOUT_URL", "https://robinhoodchain.blockscout.com"),
+}
+
+# Wrapped-native contracts, used only to price the chain's own coin through
+# DexScreener -- your ETH/BNB/SOL balance is the dry powder a rotation actually
+# moves, so leaving it out would understate every "rotate into Base" figure.
+# Robinhood Chain has no wrapped-ETH address we can verify, so its native
+# balance is reported unpriced rather than guessed at.
+WRAPPED_NATIVE: Dict[str, str] = {
+    "base": "0x4200000000000000000000000000000000000006",
+    "ethereum": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "bsc": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+    "arbitrum": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+    "solana": "So11111111111111111111111111111111111111112",
+}
+
+# Positions worth less than this are rolled into a "dust" line rather than
+# cluttering the table. They still count toward totals.
+PORTFOLIO_DUST_USD = float(os.getenv("MEMEDD_PORTFOLIO_DUST_USD", "5"))
+# Cap on tokens pulled per wallet, so one airdrop-spammed address cannot turn a
+# sync into hundreds of price lookups.
+PORTFOLIO_MAX_TOKENS_PER_WALLET = int(os.getenv("MEMEDD_PORTFOLIO_MAX_TOKENS", "150"))
+# Transfers scanned to discover which tokens a wallet has ever touched.
+PORTFOLIO_DISCOVERY_TRANSFERS = int(os.getenv("MEMEDD_PORTFOLIO_DISCOVERY_TRANSFERS", "2000"))
+CACHE_TTL_PORTFOLIO = int(os.getenv("MEMEDD_CACHE_TTL_PORTFOLIO", "120"))
+
+# Wallets are stored next to the analysis history, in the gitignored data dir.
+PORTFOLIO_DB_PATH = DATA_DIR / "history.sqlite3"
+
+
+# ==========================================================================
+# Rotation: chain-level liquidity flow
+# ==========================================================================
+DEFILLAMA_BASE = os.getenv("DEFILLAMA_BASE_URL", "https://api.llama.fi")
+
+# DefiLlama names chains its own way. Anything absent here (Robinhood Chain is
+# too new to be covered) falls back to DexScreener basket data alone, and the
+# UI says so rather than scoring the chain zero.
+DEFILLAMA_CHAIN_SLUGS: Dict[str, str] = {
+    "base": "Base",
+    "ethereum": "Ethereum",
+    "bsc": "BSC",
+    "solana": "Solana",
+    "arbitrum": "Arbitrum",
+}
+
+# The chains this portfolio actually rotates between.
+ROTATION_CHAINS: Tuple[str, ...] = tuple(
+    c.strip().lower()
+    for c in os.getenv("MEMEDD_ROTATION_CHAINS", "base,solana,bsc,robinhood").split(",")
+    if c.strip()
+)
+
+# Tokens sampled per chain to measure chain-wide activity independently of what
+# you hold. Derived live from DexScreener discovery, so there is no hardcoded
+# address list to go stale.
+BENCHMARK_BASKET_SIZE = int(os.getenv("MEMEDD_BENCHMARK_BASKET_SIZE", "25"))
+# A basket token needs real depth, or it measures noise instead of the chain.
+BENCHMARK_MIN_LIQUIDITY = float(os.getenv("MEMEDD_BENCHMARK_MIN_LIQUIDITY", "25000"))
+CACHE_TTL_CHAIN_STATS = int(os.getenv("MEMEDD_CACHE_TTL_CHAIN_STATS", "600"))
+
+
+@dataclass(frozen=True)
+class HeatWeights:
+    """Weights of the 0-100 chain heat index. Must sum to 1.0.
+
+    Split deliberately between what *your* bags are doing and what the chain is
+    doing without you: the gap between the two is the difference between "my
+    Brew bags are pumping" and "BSC is pumping", which is the whole point.
+    """
+
+    price_momentum: float = 0.25     # value-weighted 6h/24h price change
+    volume_acceleration: float = 0.20  # 6h run-rate vs 24h actual
+    turnover: float = 0.15           # volume / market cap
+    buy_pressure: float = 0.15       # buy share of trades
+    liquidity_trend: float = 0.15    # pool depth vs the previous snapshot
+    chain_tvl_trend: float = 0.10    # DefiLlama TVL / DEX volume change
+
+    def as_dict(self) -> Dict[str, float]:
+        return {
+            "price_momentum": self.price_momentum,
+            "volume_acceleration": self.volume_acceleration,
+            "turnover": self.turnover,
+            "buy_pressure": self.buy_pressure,
+            "liquidity_trend": self.liquidity_trend,
+            "chain_tvl_trend": self.chain_tvl_trend,
+        }
+
+    def validate(self) -> None:
+        total = sum(self.as_dict().values())
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(f"Heat weights must sum to 1.0 (got {total:.4f})")
+
+
+DEFAULT_HEAT_WEIGHTS = HeatWeights()
+
+HEAT_COMPONENT_LABELS: Dict[str, str] = {
+    "price_momentum": "Price momentum",
+    "volume_acceleration": "Volume acceleration",
+    "turnover": "Turnover (vol/mcap)",
+    "buy_pressure": "Buy pressure",
+    "liquidity_trend": "Liquidity trend",
+    "chain_tvl_trend": "Chain TVL / DEX volume",
+}
+
+# Share of the heat index taken from your own holdings vs the chain-wide
+# basket. Your bags are the more responsive signal but the smaller sample, so
+# the chain gets the larger share by default.
+HEAT_PORTFOLIO_WEIGHT = float(os.getenv("MEMEDD_HEAT_PORTFOLIO_WEIGHT", "0.4"))
+
+# Heat -> state. A chain is only HOT once it is both high *and* still rising,
+# which is what stops a plan trimming into the second day of a decline.
+HEAT_HOT_THRESHOLD = float(os.getenv("MEMEDD_HEAT_HOT", "68"))
+HEAT_COLD_THRESHOLD = float(os.getenv("MEMEDD_HEAT_COLD", "38"))
+# Change vs the trailing average that counts as rising or falling, in points.
+HEAT_TREND_EPSILON = float(os.getenv("MEMEDD_HEAT_TREND_EPSILON", "4"))
+# Trailing window used for the state read.
+HEAT_TREND_LOOKBACK_HOURS = float(os.getenv("MEMEDD_HEAT_LOOKBACK_HOURS", "72"))
+
+HEAT_STATES = ("hot", "heating", "cooling", "cold")
+HEAT_STATE_LABELS: Dict[str, str] = {
+    "hot": "🔥 Hot",
+    "heating": "📈 Heating",
+    "cooling": "📉 Cooling",
+    "cold": "🧊 Cold",
+}
+
+# Your bags running this far ahead of (or behind) the chain-wide read is
+# idiosyncratic rather than a chain rotation, and is called out separately.
+HEAT_DIVERGENCE_THRESHOLD = float(os.getenv("MEMEDD_HEAT_DIVERGENCE", "20"))
+
+
+@dataclass
+class RotationSettings:
+    """User-tunable knobs for the trim/rotate planner."""
+
+    # Skip actions too small to be worth the gas and the spread.
+    min_action_usd: float = 50.0
+    # Trim ladder: how much of a position to take off at each heat band.
+    trim_pct_hot: float = 25.0
+    trim_pct_overweight: float = 20.0
+    # A position bigger than this share of the portfolio is overweight
+    # regardless of heat. Defaults to the risk profile's cap when one is given.
+    max_position_pct: Optional[float] = None
+    # Only propose trimming a position that is actually up by this much.
+    min_gain_pct_to_trim: float = 20.0
+    # Chains cooler than this are candidates to rotate into.
+    rotate_into_below_heat: float = 50.0
+    # Do not propose the same rotation twice within this window.
+    cooldown_hours: float = 12.0
+
+    def describe(self) -> str:
+        return (
+            f"Trim {self.trim_pct_hot:.0f}% on hot chains · "
+            f"rotate into chains below heat {self.rotate_into_below_heat:.0f} · "
+            f"min action ${self.min_action_usd:,.0f}"
+        )
+
+
+DEFAULT_ROTATION_SETTINGS = RotationSettings()

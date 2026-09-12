@@ -12,15 +12,16 @@ logic lives in importable, testable modules.
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
 
-from src import (config, data_fetchers, history, llm, llm_analyzers, mindshare,
-                 report, ui, wallet_flow)
+from src import (balances, config, data_fetchers, history, llm, llm_analyzers,
+                 mindshare, portfolio, portfolio_store, report, rotation, ui,
+                 wallet_flow)
 from src.analyzer import analyze_many, analyze_token, scan
-from src.models import AnalysisResult, ScanCandidate
+from src.models import AnalysisResult, PortfolioSnapshot, ScanCandidate, Wallet
 from src.utils import fmt_usd, parse_addresses, score_emoji, short_address
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -115,6 +116,8 @@ def init_state() -> None:
         "pending_address": "",    # set when drilling in from Scanner/History
         "cache_nonce": 0,         # bumped to force a refetch
         "active_tab": "analyzer",
+        "portfolio": None,        # PortfolioSnapshot from the last sync
+        "rotation_plan": None,    # RotationPlan from the last rotation refresh
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -264,6 +267,7 @@ def render_sidebar() -> config.AppSettings:
             data_fetchers.clear_caches()
             mindshare.clear_cache()
             wallet_flow.clear_cache()
+            rotation.clear_cache()
             st.session_state["cache_nonce"] += 1
             st.toast("Caches cleared — next request hits the APIs live.")
 
@@ -591,6 +595,377 @@ def render_latest_profiles(settings: config.AppSettings) -> None:
 
 
 # ==========================================================================
+# Tab: Portfolio
+# ==========================================================================
+def render_wallet_manager() -> None:
+    """Register the wallets a sync reads. One text area per chain."""
+    existing = portfolio_store.list_wallets()
+    by_chain: Dict[str, List[Wallet]] = {}
+    for wallet in existing:
+        by_chain.setdefault(wallet.chain, []).append(wallet)
+
+    with st.expander(
+        f"👛 Wallets ({len(existing)} registered)", expanded=not existing
+    ):
+        st.caption(
+            "Addresses only — read-only, public data. Nothing here can move a coin, and "
+            "no private key, seed phrase or exchange login is ever asked for or accepted. "
+            "Stored in `data/history.sqlite3`, which is gitignored."
+        )
+        parsed: List[Wallet] = []
+        problems: List[str] = []
+        columns = st.columns(2, gap="large")
+        for index, chain in enumerate(config.ROTATION_CHAINS):
+            chain_cfg = config.get_chain(chain)
+            with columns[index % 2]:
+                current = by_chain.get(chain, [])
+                lines = "\n".join(
+                    f"{w.address}, {w.label}" if w.label else w.address for w in current
+                )
+                st.markdown(f"**{chain_cfg.label}**")
+                raw = st.text_area(
+                    chain_cfg.label,
+                    value=lines,
+                    height=110,
+                    label_visibility="collapsed",
+                    key=f"wallets_{chain}",
+                    placeholder=(
+                        "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU, main"
+                        if chain_cfg.address_kind == "solana"
+                        else "0x532f27101965dd16442E59d40670FaF5eBB142E4, main"
+                    ),
+                    help="One address per line, with an optional label after a comma.",
+                )
+                parsed.extend(portfolio.parse_wallet_input(raw, chain))
+                problems.extend(
+                    f"{chain_cfg.label}: {problem}"
+                    for problem in portfolio.wallet_input_errors(raw, chain)
+                )
+                st.caption(f"⚙️ {balances.provider_status(chain)}")
+
+        for problem in problems:
+            st.caption(f"⚠️ {problem}")
+
+        left, right = st.columns([1, 3])
+        if left.button("💾 Save wallets", type="primary", **ui.stretch()):
+            saved = portfolio_store.replace_wallets(parsed)
+            st.success(f"Saved {saved} wallet(s).")
+            st.rerun()
+        right.caption(
+            f"Will save **{len(parsed)}** wallet(s) across "
+            f"{len({w.chain for w in parsed})} chain(s)."
+        )
+
+
+def render_positions_editor(snapshot: PortfolioSnapshot) -> None:
+    """Positions table, with avg cost and ecosystem tag editable in place."""
+    if not snapshot.positions:
+        return
+
+    frame = pd.DataFrame([
+        {
+            "Symbol": position.symbol or "?",
+            "Chain": config.get_chain(position.chain).label,
+            "Qty": position.quantity,
+            "Price": position.price_usd,
+            "Value": position.value_usd,
+            "Alloc %": snapshot.allocation_pct(position),
+            "1h %": position.snapshot.price_change_1h if position.snapshot else 0.0,
+            "24h %": position.snapshot.price_change_24h if position.snapshot else 0.0,
+            "Liquidity": position.snapshot.liquidity_usd if position.snapshot else 0.0,
+            "Ecosystem": position.tag,
+            "Avg cost": position.avg_cost_usd,
+            "P&L": position.unrealized_pnl_usd,
+            "_key": position.key,
+        }
+        for position in snapshot.positions
+    ])
+
+    keys = list(frame["_key"])
+    edited = st.data_editor(
+        frame.drop(columns=["_key"]),
+        **ui.stretch(),
+        hide_index=True,
+        key="positions_editor",
+        column_config={
+            "Qty": st.column_config.NumberColumn("Qty", format="%.4g", disabled=True),
+            "Price": st.column_config.NumberColumn("Price", format="$%.6g", disabled=True),
+            "Value": st.column_config.NumberColumn("Value", format="$%.2f", disabled=True),
+            "Alloc %": st.column_config.ProgressColumn(
+                "Alloc %", min_value=0, max_value=100, format="%.1f%%"),
+            "1h %": st.column_config.NumberColumn("1h %", format="%.1f%%", disabled=True),
+            "24h %": st.column_config.NumberColumn("24h %", format="%.1f%%", disabled=True),
+            "Liquidity": st.column_config.NumberColumn("Liquidity", format="$%.0f", disabled=True),
+            "Ecosystem": st.column_config.TextColumn(
+                "Ecosystem", help='Group tag, e.g. "Brew". Positions sharing a tag roll up together.'),
+            "Avg cost": st.column_config.NumberColumn(
+                "Avg cost", format="$%.8g",
+                help="Your average entry price. A wallet read cannot know this — "
+                     "fill it in and P&L becomes real. Leave blank for 'basis unknown'."),
+            "P&L": st.column_config.NumberColumn("P&L", format="$%.2f", disabled=True),
+        },
+    )
+
+    if st.button("💾 Save costs & tags"):
+        changes = 0
+        # Match rows back to positions by key rather than by position: the
+        # editor preserves the input index, but a row order assumption here
+        # would silently write one token's cost basis onto another.
+        by_key = {position.key: position for position in snapshot.positions}
+        for row_index, key in zip(frame.index, keys):
+            position = by_key.get(key)
+            if position is None:
+                continue
+            row = edited.loc[row_index]
+            new_tag = (row["Ecosystem"] or "").strip()
+            raw_cost = row["Avg cost"]
+            new_cost = None if pd.isna(raw_cost) else float(raw_cost)
+            if new_tag != (position.tag or ""):
+                portfolio_store.set_position_meta(position.chain, position.address, tag=new_tag)
+                position.tag = new_tag
+                changes += 1
+            if new_cost != position.avg_cost_usd:
+                if new_cost is None:
+                    portfolio_store.clear_avg_cost(position.chain, position.address)
+                else:
+                    portfolio_store.set_position_meta(
+                        position.chain, position.address, avg_cost_usd=new_cost)
+                position.avg_cost_usd = new_cost
+                changes += 1
+        st.success(f"Saved {changes} change(s)." if changes else "Nothing to save.")
+        st.rerun()
+
+
+def render_equity_curve() -> None:
+    """Portfolio value over time, built from every stored sync."""
+    curve = portfolio_store.equity_curve()
+    if len(curve) < 2:
+        st.caption(
+            "📈 The equity curve appears once you have synced at least twice — "
+            "every sync is stored locally, so history builds itself from here."
+        )
+        return
+    frame = pd.DataFrame(curve)
+    frame["taken_at"] = pd.to_datetime(frame["taken_at"], format="mixed", utc=True, errors="coerce")
+    frame = frame.dropna(subset=["taken_at"]).set_index("taken_at")
+    st.markdown("##### 📈 Portfolio value")
+    st.line_chart(frame["total_usd"], height=220)
+
+
+def tab_portfolio(settings: config.AppSettings) -> None:
+    st.markdown("#### 💼 Portfolio")
+    st.caption(
+        "Positions read straight from your wallets on Base, Solana, BNB Chain and "
+        "Robinhood Chain, priced live on DexScreener. Read-only: addresses in, "
+        "prices out, nothing that can move a coin."
+    )
+
+    render_wallet_manager()
+
+    wallets = portfolio_store.list_wallets()
+    col1, col2 = st.columns([1, 3])
+    sync_clicked = col1.button(
+        "🔄 Sync balances", type="primary", disabled=not wallets, **ui.stretch()
+    )
+    if not wallets:
+        col2.caption("Add at least one wallet above to sync.")
+
+    if sync_clicked:
+        previous = portfolio_store.recent_snapshots(limit=1)
+        st.session_state["previous_total"] = previous[0]["total_usd"] if previous else None
+        with st.spinner(f"Reading {len(wallets)} wallet(s) on-chain and pricing what they hold…"):
+            st.session_state["portfolio"] = portfolio.sync_portfolio(
+                wallets=wallets, use_cache=False
+            )
+
+    snapshot: Optional[PortfolioSnapshot] = st.session_state.get("portfolio")
+    if snapshot is None:
+        stored = portfolio_store.recent_snapshots(limit=1)
+        if stored:
+            col2.caption(
+                f"Showing nothing yet — last stored sync was {stored[0]['taken_at'][:16]} "
+                f"at {fmt_usd(stored[0]['total_usd'])}. Hit sync for live numbers."
+            )
+        st.info(
+            "Register your wallets, then hit **Sync balances**. Positions are discovered "
+            "automatically — you never have to type in what you hold.",
+            icon="👋",
+        )
+        render_equity_curve()
+        return
+
+    st.divider()
+    ui.render_portfolio_summary(snapshot, st.session_state.get("previous_total"))
+    ui.render_coverage_notes(snapshot)
+
+    if not snapshot.positions:
+        st.warning(
+            "No priced positions came back. If you do hold tokens on these chains, check the "
+            "provider status next to each wallet above — a missing RPC or API key reads as an "
+            "empty wallet.",
+            icon="🕳️",
+        )
+        return
+
+    st.markdown("")
+    ui.render_allocation(snapshot, portfolio.totals_by_tag(snapshot))
+
+    st.markdown("##### Positions")
+    st.caption(
+        "**Ecosystem** and **Avg cost** are yours to edit — tag your Brew bags to watch them "
+        "as one group, and add an entry price to turn P&L on."
+    )
+    render_positions_editor(snapshot)
+
+    st.markdown("")
+    render_equity_curve()
+
+    st.markdown("##### Position detail")
+    options = list(range(len(snapshot.positions)))
+    selected = st.selectbox(
+        "Position",
+        options,
+        format_func=lambda index: (
+            f"{snapshot.positions[index].symbol or '?'} · "
+            f"{config.get_chain(snapshot.positions[index].chain).label} · "
+            f"{fmt_usd(snapshot.positions[index].value_usd)}"
+        ),
+        label_visibility="collapsed",
+    )
+    position = snapshot.positions[selected]
+    ui.render_position_detail(position, snapshot.allocation_pct(position))
+
+    if st.button(f"🔬 Run full due diligence on {position.symbol or 'this token'}"):
+        st.session_state["pending_address"] = position.address
+        run_analysis([position.address], config.AppSettings(
+            chain=position.chain,
+            portfolio_usd=snapshot.total_usd or settings.portfolio_usd,
+            risk_profile=settings.risk_profile,
+        ))
+        st.success("Analyzed — the full report is in the **CA Analyzer** tab.")
+
+    csv = pd.DataFrame([
+        {**p.to_dict(), "snapshot": None} for p in snapshot.positions
+    ]).to_csv(index=False).encode("utf-8")
+    st.download_button("⬇️ Export positions as CSV", csv, "memedd_positions.csv", "text/csv")
+
+
+# ==========================================================================
+# Tab: Rotation
+# ==========================================================================
+def render_heat_history_chart(heats: List) -> None:
+    """Heat over time per chain, once there is enough history to plot."""
+    series = {}
+    for heat in heats:
+        rows = portfolio_store.heat_history(heat.chain, limit=200)
+        if len(rows) >= 2:
+            frame = pd.DataFrame(rows)
+            frame["taken_at"] = pd.to_datetime(
+                frame["taken_at"], format="mixed", utc=True, errors="coerce")
+            frame = frame.dropna(subset=["taken_at"]).set_index("taken_at")
+            series[config.get_chain(heat.chain).label] = frame["heat"]
+    if not series:
+        st.caption(
+            "📈 Heat history appears after a few refreshes — each one is stored locally, "
+            "and the trend is what turns a snapshot into a rotation signal."
+        )
+        return
+    st.markdown("##### Heat over time")
+    st.line_chart(pd.DataFrame(series), height=240)
+
+
+def tab_rotation(settings: config.AppSettings) -> None:
+    st.markdown("#### 🔄 Liquidity rotation")
+    st.caption(
+        "Which chain the money is on right now, measured two ways: the tokens you hold "
+        "there, and a live basket of tokens you don't. When the two agree, liquidity has "
+        "rotated onto the chain. When they don't, it's just your bags."
+    )
+
+    snapshot: Optional[PortfolioSnapshot] = st.session_state.get("portfolio")
+
+    with st.expander("⚙️ Rotation rules", expanded=False):
+        col1, col2, col3 = st.columns(3)
+        trim_pct = col1.slider("Trim on a hot chain (%)", 5, 75,
+                               int(config.DEFAULT_ROTATION_SETTINGS.trim_pct_hot), step=5)
+        min_gain = col2.number_input("Only trim winners up at least (%)", min_value=0.0,
+                                     value=config.DEFAULT_ROTATION_SETTINGS.min_gain_pct_to_trim,
+                                     step=10.0)
+        min_action = col3.number_input("Ignore moves under ($)", min_value=0.0,
+                                       value=config.DEFAULT_ROTATION_SETTINGS.min_action_usd,
+                                       step=25.0)
+        col4, col5 = st.columns(2)
+        rotate_below = col4.slider("Rotate into chains below heat", 10, 70,
+                                   int(config.DEFAULT_ROTATION_SETTINGS.rotate_into_below_heat),
+                                   step=5)
+        cap_override = col5.number_input(
+            "Max position (% of book, 0 = use risk profile)", min_value=0.0, max_value=100.0,
+            value=0.0, step=1.0,
+            help=f"Blank uses your sidebar risk profile: "
+                 f"{settings.risk().max_position_pct:.0f}% for {settings.risk().label}.",
+        )
+        rotation_settings = config.RotationSettings(
+            trim_pct_hot=float(trim_pct),
+            min_gain_pct_to_trim=float(min_gain),
+            min_action_usd=float(min_action),
+            rotate_into_below_heat=float(rotate_below),
+            max_position_pct=float(cap_override) if cap_override > 0 else None,
+        )
+        st.caption(rotation_settings.describe())
+
+    col1, col2 = st.columns([1, 3])
+    refresh = col1.button("🌡️ Refresh heat", type="primary", **ui.stretch())
+    if snapshot is None:
+        col2.caption(
+            "Heat still works without a sync — the chain-wide half needs no wallet. "
+            "Sync in **Portfolio** to add your own positions to the reading."
+        )
+
+    if refresh:
+        previous = portfolio_store.previous_snapshot()
+        changes = portfolio.position_changes(snapshot, previous) if snapshot else {}
+        with st.spinner("Reading chain baskets, TVL and DEX volume…"):
+            heats = rotation.compute_heats(
+                snapshot=snapshot, position_changes=changes, use_cache=False
+            )
+        plan = rotation.build_rotation_plan(
+            snapshot or PortfolioSnapshot(), heats,
+            settings=rotation_settings, risk=settings.risk(),
+        )
+        st.session_state["rotation_plan"] = plan
+
+    plan = st.session_state.get("rotation_plan")
+    if plan is None:
+        st.info(
+            "Hit **Refresh heat** to score every chain. Each refresh is stored, so the "
+            "trend — which is what a rotation actually is — builds from here.",
+            icon="🌡️",
+        )
+        return
+
+    # Re-plan on the stored heats whenever the rules change, so the sliders
+    # respond without paying for another round of network calls.
+    plan = rotation.build_rotation_plan(
+        snapshot or PortfolioSnapshot(), plan.heats,
+        settings=rotation_settings, risk=settings.risk(),
+    )
+
+    st.divider()
+    ui.render_flow_ranking(plan.heats)
+
+    columns = st.columns(2, gap="large")
+    for index, heat in enumerate(plan.heats):
+        with columns[index % 2]:
+            ui.render_chain_heat(heat)
+
+    st.markdown("")
+    render_heat_history_chart(plan.heats)
+
+    st.markdown("##### 🎯 Suggested moves")
+    ui.render_rotation_plan(plan)
+
+
+# ==========================================================================
 # Tab: Watchlist
 # ==========================================================================
 def tab_watchlist(settings: config.AppSettings) -> None:
@@ -744,13 +1119,19 @@ def main() -> None:
 
     ui.hero(
         "🧪 MemeDD Dashboard",
-        f"Meme-coin due diligence on {config.get_chain(settings.chain).label} — "
-        "security, liquidity, distribution, momentum and position sizing in one pass.",
+        "Multi-chain portfolio, liquidity rotation and meme-coin due diligence — "
+        "Base, Solana, BNB Chain and Robinhood Chain in one view.",
     )
 
-    analyzer_tab, scanner_tab, watchlist_tab, history_tab = st.tabs(
-        ["🔍 CA Analyzer", "📡 Scanner", "⭐ Watchlist", "🕘 History"]
+    (portfolio_tab, rotation_tab, analyzer_tab, scanner_tab,
+     watchlist_tab, history_tab) = st.tabs(
+        ["💼 Portfolio", "🔄 Rotation", "🔍 CA Analyzer", "📡 Scanner",
+         "⭐ Watchlist", "🕘 History"]
     )
+    with portfolio_tab:
+        tab_portfolio(settings)
+    with rotation_tab:
+        tab_rotation(settings)
     with analyzer_tab:
         tab_analyzer(settings)
     with scanner_tab:

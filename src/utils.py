@@ -16,7 +16,10 @@ from typing import Any, Callable, Dict, Hashable, Iterable, List, Optional, Tupl
 # --------------------------------------------------------------------------
 # Address handling
 # --------------------------------------------------------------------------
-_EVM_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+# The 0x prefix is matched case-insensitively: a spreadsheet or explorer that
+# echoes "0X..." is still a valid EVM address, and treating it as unknown
+# would leave it uncomparable -- the same holding counted twice.
+_EVM_RE = re.compile(r"^0[xX][a-fA-F0-9]{40}$")
 # Base58 alphabet (no 0, O, I, l) - Solana mints are 32-44 chars.
 _SOLANA_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 

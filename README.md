@@ -1,11 +1,21 @@
 # 🧪 MemeDD Dashboard
 
-Meme-coin **due diligence and scanning** for Base (and any other chain you point it at).
-Paste a contract address, get a full report: security/rug checks, liquidity quality,
-holder distribution, momentum, narrative, a 0–100 composite score, a Buy/Watch/Pass
-decision and a concrete position-sizing plan for *your* portfolio.
+**Multi-chain portfolio management, liquidity-rotation tracking and meme-coin due
+diligence** across Base, Solana, BNB Chain and Robinhood Chain.
+
+Register your wallet addresses and the app reads what you hold straight off-chain,
+prices it live, groups it by ecosystem, and scores every chain on how hot it is
+right now — so when one chain's liquidity surge starts cooling you can see it and
+rotate before it does. Paste a contract address instead and you get the full
+due-diligence report: security/rug checks, liquidity quality, holder distribution,
+momentum, narrative, a 0–100 composite score and a position-sizing plan.
 
 Works out of the box on free public APIs — **no API keys required**.
+
+> **Read-only by design.** The app takes public wallet *addresses*, nothing more.
+> It never asks for a private key, seed phrase or exchange login, holds no key
+> with spend authority, and cannot place a trade. Every suggestion it makes is
+> arithmetic shown on screen for you to act on yourself.
 
 ---
 
@@ -41,6 +51,66 @@ DexScreener URLs work too) and get, per token:
 
 Chains: **Base** (default), Ethereum, Solana, BNB Chain, Arbitrum and
 **Robinhood Chain** — switchable in the sidebar.
+
+### 💼 Portfolio
+Register your wallet addresses per chain; the app discovers and prices everything
+you hold. No trade ledger to maintain, no CSV to export from anywhere.
+
+- **Balances read off-chain** — Blockscout's token list where available, otherwise
+  Etherscan V2 discovery plus `balanceOf` on a public RPC, and
+  `getTokenAccountsByOwner` (both SPL Token and Token-2022) on Solana. Your native
+  ETH/BNB/SOL counts too: that is the dry powder a rotation actually moves.
+- **Allocation by chain and by ecosystem** — tag positions (e.g. `Brew`) and the
+  whole cluster rolls up as one line with its own value-weighted 24h move.
+- **P&L, honestly** — a wallet read gives quantity, never entry price, so avg cost
+  is an editable column. Leave it blank and the app says *basis unknown* rather
+  than showing a confident zero; fill it in and P&L becomes real.
+- **Equity curve** — every sync is stored locally, so portfolio history builds
+  itself from the first sync onward.
+- **Nothing hidden** — dust is summed rather than dropped, unpriceable holdings are
+  listed with the reason, and a chain that could not be read says so instead of
+  looking like an empty wallet.
+
+### 🔄 Rotation
+The question this tab answers is not "is this coin good" but "is this *chain* where
+the money currently is, and is my book positioned for where it goes next".
+
+Each chain gets a **0–100 heat index**, measured twice from two independent samples:
+
+| Half | Sample | What it tells you |
+| --- | --- | --- |
+| **Your bags** | the tokens you hold there, value-weighted | how your book is performing |
+| **The chain** | a live basket of liquid tokens you *don't* hold, plus DefiLlama TVL and DEX volume | whether the chain itself is moving |
+
+Reporting both is the entire point. When your Brew positions on BNB are screaming
+and the BSC basket is flat, that is an idiosyncratic pump in your tokens — trim the
+token. When both run together, liquidity has genuinely rotated onto the chain —
+trim the chain. The **divergence** figure is what separates the two, and it is
+shown on every chain card.
+
+Heat feeds a four-state machine — 🔥 Hot / 📈 Heating / 📉 Cooling / 🧊 Cold —
+judged against that chain's own stored history, so a chain is only *hot* while it
+is both high **and** not already rolling over, and only *cold* while it is low and
+not yet turning up. A cold chain that has started to lift is the earliest turn, and
+it ranks ahead of one still falling at the same heat.
+
+From that comes a **concrete plan**, with the arithmetic shown:
+
+> Trim 25% of BREW on BNB Chain — **$1,250**
+> BREW is +180% (vs your avg cost) while BNB Chain reads 84/100 🔥 Hot for 36h;
+> your holdings there run 22 points hotter than the chain basket, so this is your
+> tokens moving rather than the whole chain.
+>
+> Rotate $750 from BNB Chain → Base
+> Base reads 31/100 (📈 Heating) and has started to turn up. You hold 8.4% of the
+> book there today.
+
+Guardrails come from your sidebar risk profile: a trim is capped at that profile's
+share of pool liquidity (so the plan never suggests dumping more than the pool can
+absorb, and says so when it clamps), positions over the max-position cap get
+trimmed back to it regardless of heat, and moves too small to beat the spread are
+not suggested at all. Nothing is ever proposed into a chain the app could not
+actually read.
 
 ### 📡 Scanner
 Sweeps DexScreener for candidates on the selected chain, filters them
@@ -405,6 +475,13 @@ python -m pytest tests/ -q
 | Lore & narrative | Built-in heuristics | No |
 | Project profile / new launches | [DexScreener token profiles](https://docs.dexscreener.com/api/reference) | No |
 | Multi-LLM ensemble | xAI / Anthropic / OpenAI | Yes — optional, any subset |
+| Wallet balances (EVM) | Public JSON-RPC + [Blockscout](https://docs.blockscout.com/devs/apis) | No |
+| Wallet balances (Solana) | Public Solana RPC | No (a Helius/QuickNode URL avoids throttling) |
+| Token discovery on Base / BNB Chain | [Etherscan V2](https://docs.etherscan.io/etherscan-v2) | Free key — without it, Blockscout covers discovery |
+| Chain TVL & DEX volume | [DefiLlama](https://defillama.com/docs/api) | No |
+
+No key in this table can move a coin. RPC and explorer endpoints are read-only,
+and the app has no code path that signs a transaction.
 
 To add keys, copy the template and edit it:
 
@@ -483,12 +560,16 @@ src/
   llm_analyzers.py      Multi-LLM ensemble: strict JSON, parallel, consensus
   mindshare.py          X/Twitter mindshare via Grok's server-side search
   wallet_flow.py        On-chain wallet flow + smart-money watchlist (Etherscan)
+  balances.py           Wallet balance providers (Blockscout / EVM RPC / Solana RPC)
+  portfolio.py          Positions, pricing, allocation, ecosystem tags, P&L
+  portfolio_store.py    Local SQLite: wallets, annotations, snapshots, heat history
+  rotation.py           Chain heat index, state machine, trim/rotate planner
   history.py            Local SQLite history
   report.py             Markdown / JSON export
   ui.py                 Reusable Streamlit components + CSS
   utils.py              Formatting, address parsing, safe coercion, TTL cache
   scripts/check_grok.py Diagnose your Grok key, models and X search access
-tests/                  271 unit + end-to-end tests (network and LLMs stubbed)
+tests/                  361 unit + end-to-end tests (network, RPC and LLMs stubbed)
 .streamlit/config.toml  Dark theme
 ```
 
@@ -566,11 +647,29 @@ Verify contracts by hand before trading on it.
 - **Price impact is an approximation.** Slippage uses a constant-product estimate
   (`x / (L/2 + x)`), which is the right order of magnitude but not a quote — v3
   concentrated liquidity in particular can behave very differently.
+- **Cost basis cannot be read from a wallet.** No free API returns the USD price
+  of each historical buy, so avg cost is something you type in. Until you do, the
+  app reports *basis unknown* and falls back to performance since the first sync
+  rather than inventing an entry price.
+- **Heat needs history to read a trend.** The first refresh can only score the
+  level; states (heating vs cooling) sharpen as stored readings accumulate, which
+  is why every refresh is persisted locally.
+- **Robinhood Chain has thinner rotation data.** DefiLlama does not cover chain
+  4663, so its heat comes from DexScreener activity alone. The chain card names
+  the missing input and lowers its own confidence rather than scoring it as cold.
+- **A chain that cannot be read is "unknown", not "cold".** Heat confidence drops
+  with every missing input, and the planner will not rotate into a chain whose
+  confidence is too low — an unreachable RPC must never read as a buying
+  opportunity.
+- **Solana's public RPC throttles.** A large wallet may need a Helius or
+  QuickNode URL in `SOLANA_RPC_URL` to sync reliably.
 
 ---
 
 ## Roadmap
 
+- Optional lot ledger on top of the existing tables, for true realised P&L
+- Alerting when a chain changes heat state or a position breaches its cap
 - Per-model cost/latency tracking and a cheap-model tier for scanning
 - Mindshare history, to score attention *trend* rather than a point reading
 - Wallet/bundle clustering to catch sybil "holder counts"

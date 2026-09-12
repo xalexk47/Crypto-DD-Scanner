@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
-from .utils import age_hours, fmt_age
+from .utils import age_hours, fmt_age, normalize_address
 
 
 # --------------------------------------------------------------------------
@@ -743,4 +743,263 @@ class ScanCandidate:
             "Address": s.address,
             "DEX": s.dex_id,
             "Notes": "; ".join(self.reasons[:3]),
+        }
+
+
+# --------------------------------------------------------------------------
+# Portfolio
+# --------------------------------------------------------------------------
+@dataclass
+class Wallet:
+    """One address you own, on one chain."""
+
+    address: str
+    chain: str
+    label: str = ""
+    added_at: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Position:
+    """One token you hold, aggregated across every wallet on its chain."""
+
+    address: str
+    chain: str
+    quantity: float
+    symbol: str = ""
+    name: str = ""
+    price_usd: float = 0.0
+    value_usd: float = 0.0
+    snapshot: Optional[TokenSnapshot] = None
+    wallets: List[str] = field(default_factory=list)
+    # Optional cost basis. Wallet sync can read quantity but never entry price,
+    # so this is whatever you typed in -- None means "basis unknown", which the
+    # UI reports rather than quietly showing a P&L of zero.
+    avg_cost_usd: Optional[float] = None
+    tag: str = ""                      # ecosystem grouping, e.g. "Brew"
+    note: str = ""
+    first_seen: str = ""               # first sync that saw this position
+    priced: bool = True                # False when DexScreener has no pair
+    source: str = ""                   # provider that reported the balance
+
+    @property
+    def cost_basis_usd(self) -> Optional[float]:
+        if self.avg_cost_usd is None:
+            return None
+        return self.avg_cost_usd * self.quantity
+
+    @property
+    def unrealized_pnl_usd(self) -> Optional[float]:
+        basis = self.cost_basis_usd
+        if basis is None:
+            return None
+        return self.value_usd - basis
+
+    @property
+    def unrealized_pnl_pct(self) -> Optional[float]:
+        basis = self.cost_basis_usd
+        if not basis:
+            return None
+        return (self.value_usd - basis) / basis * 100.0
+
+    @property
+    def key(self) -> str:
+        """Stable identity for one holding.
+
+        Normalized rather than lower-cased: EVM addresses fold to lower case,
+        but a Solana mint is case-sensitive and lower-casing it would stop the
+        key matching what the store wrote.
+        """
+        return f"{self.chain}:{normalize_address(self.address)}"
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = {
+            key: value for key, value in asdict(self).items() if key != "snapshot"
+        }
+        data["snapshot"] = self.snapshot.to_dict() if self.snapshot else None
+        data.update(
+            cost_basis_usd=self.cost_basis_usd,
+            unrealized_pnl_usd=self.unrealized_pnl_usd,
+            unrealized_pnl_pct=self.unrealized_pnl_pct,
+        )
+        return data
+
+
+@dataclass
+class PortfolioSnapshot:
+    """The whole book at one moment, as read from your wallets."""
+
+    positions: List[Position] = field(default_factory=list)
+    taken_at: str = ""
+    dust_usd: float = 0.0
+    dust_count: int = 0
+    unpriced: List[Dict[str, Any]] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    # chain -> why that chain's data is partial or missing, shown in the UI so
+    # an empty chain is never mistaken for an empty wallet.
+    coverage_notes: Dict[str, str] = field(default_factory=dict)
+    wallets_synced: int = 0
+
+    @property
+    def total_usd(self) -> float:
+        return sum(position.value_usd for position in self.positions) + self.dust_usd
+
+    def by_chain(self) -> Dict[str, float]:
+        totals: Dict[str, float] = {}
+        for position in self.positions:
+            totals[position.chain] = totals.get(position.chain, 0.0) + position.value_usd
+        return dict(sorted(totals.items(), key=lambda item: item[1], reverse=True))
+
+    def by_tag(self) -> Dict[str, float]:
+        """Value grouped by ecosystem tag; untagged holdings roll up together."""
+        totals: Dict[str, float] = {}
+        for position in self.positions:
+            label = position.tag or "Untagged"
+            totals[label] = totals.get(label, 0.0) + position.value_usd
+        return dict(sorted(totals.items(), key=lambda item: item[1], reverse=True))
+
+    def chain_allocation_pct(self) -> Dict[str, float]:
+        total = self.total_usd
+        if total <= 0:
+            return {}
+        return {chain: value / total * 100.0 for chain, value in self.by_chain().items()}
+
+    def positions_on(self, chain: str) -> List["Position"]:
+        return [p for p in self.positions if p.chain == chain]
+
+    def allocation_pct(self, position: "Position") -> float:
+        total = self.total_usd
+        return (position.value_usd / total * 100.0) if total > 0 else 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "taken_at": self.taken_at,
+            "total_usd": self.total_usd,
+            "dust_usd": self.dust_usd,
+            "dust_count": self.dust_count,
+            "wallets_synced": self.wallets_synced,
+            "warnings": self.warnings,
+            "coverage_notes": self.coverage_notes,
+            "unpriced": self.unpriced,
+            "by_chain": self.by_chain(),
+            "by_tag": self.by_tag(),
+            "positions": [position.to_dict() for position in self.positions],
+        }
+
+
+# --------------------------------------------------------------------------
+# Rotation / chain liquidity flow
+# --------------------------------------------------------------------------
+@dataclass
+class ChainHeat:
+    """How hot one chain is right now, 0-100, and how it got there."""
+
+    chain: str
+    heat: float = 0.0
+    state: str = "cold"                 # hot | heating | cooling | cold
+    hours_in_state: Optional[float] = None
+    # 0-100 sub-scores, keyed by config.HEAT_COMPONENT_LABELS.
+    components: Dict[str, float] = field(default_factory=dict)
+    portfolio_heat: Optional[float] = None   # from tokens you hold
+    market_heat: Optional[float] = None      # from the chain-wide basket
+    previous_heat: Optional[float] = None
+    # Inputs that actually contributed, and those that could not be reached.
+    inputs_used: List[str] = field(default_factory=list)
+    missing_inputs: List[str] = field(default_factory=list)
+    confidence: float = 1.0             # 0-1, lowered when inputs are missing
+    basket_size: int = 0
+    position_count: int = 0
+    tvl_usd: Optional[float] = None
+    dex_volume_24h: Optional[float] = None
+    notes: List[str] = field(default_factory=list)
+    taken_at: str = ""
+
+    @property
+    def divergence(self) -> Optional[float]:
+        """Your bags minus the chain. Positive = your holdings lead the chain."""
+        if self.portfolio_heat is None or self.market_heat is None:
+            return None
+        return self.portfolio_heat - self.market_heat
+
+    @property
+    def trend(self) -> Optional[float]:
+        if self.previous_heat is None:
+            return None
+        return self.heat - self.previous_heat
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data.update(divergence=self.divergence, trend=self.trend)
+        return data
+
+
+@dataclass
+class RotationAction:
+    """One suggested move. Advisory only - nothing here executes a trade."""
+
+    kind: str                      # trim | rotate | add | hold
+    chain: str
+    reason: str
+    symbol: str = ""
+    address: str = ""
+    amount_usd: float = 0.0
+    pct_of_position: float = 0.0
+    dest_chain: str = ""
+    priority: float = 0.0          # higher sorts first
+    warnings: List[str] = field(default_factory=list)
+
+    @property
+    def headline(self) -> str:
+        if self.kind == "trim":
+            return f"Trim {self.pct_of_position:.0f}% of {self.symbol or self.address} on {self.chain}"
+        if self.kind == "rotate":
+            return f"Rotate ${self.amount_usd:,.0f} from {self.chain} → {self.dest_chain}"
+        if self.kind == "add":
+            return f"Add ${self.amount_usd:,.0f} on {self.chain}"
+        return f"Hold {self.symbol or self.chain}"
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["headline"] = self.headline
+        return data
+
+
+@dataclass
+class RotationPlan:
+    """Ranked chains plus the concrete moves that follow from them."""
+
+    heats: List[ChainHeat] = field(default_factory=list)
+    actions: List[RotationAction] = field(default_factory=list)
+    generated_at: str = ""
+    portfolio_usd: float = 0.0
+    notes: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+    @property
+    def total_trim_usd(self) -> float:
+        return sum(a.amount_usd for a in self.actions if a.kind == "trim")
+
+    @property
+    def hottest(self) -> Optional[ChainHeat]:
+        return self.heats[0] if self.heats else None
+
+    @property
+    def coolest(self) -> Optional[ChainHeat]:
+        return self.heats[-1] if self.heats else None
+
+    def actions_of(self, kind: str) -> List[RotationAction]:
+        return [a for a in self.actions if a.kind == kind]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "generated_at": self.generated_at,
+            "portfolio_usd": self.portfolio_usd,
+            "total_trim_usd": self.total_trim_usd,
+            "notes": self.notes,
+            "warnings": self.warnings,
+            "heats": [heat.to_dict() for heat in self.heats],
+            "actions": [action.to_dict() for action in self.actions],
         }
