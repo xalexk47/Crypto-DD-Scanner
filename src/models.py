@@ -986,13 +986,19 @@ class RotationAction:
 
     @property
     def headline(self) -> str:
+        # Chains are named the way every other surface names them: "BNB Chain",
+        # not the internal key "bsc".
+        from . import config
+
+        chain = config.get_chain(self.chain).label
+        destination = config.get_chain(self.dest_chain).label if self.dest_chain else ""
         if self.kind == "trim":
-            return f"Trim {self.pct_of_position:.0f}% of {self.symbol or self.address} on {self.chain}"
+            return f"Trim {self.pct_of_position:.0f}% of {self.symbol or self.address} on {chain}"
         if self.kind == "rotate":
-            return f"Rotate ${self.amount_usd:,.0f} from {self.chain} → {self.dest_chain}"
+            return f"Rotate ${self.amount_usd:,.0f} from {chain} → {destination}"
         if self.kind == "add":
-            return f"Add ${self.amount_usd:,.0f} on {self.chain}"
-        return f"Hold {self.symbol or self.chain}"
+            return f"Add ${self.amount_usd:,.0f} on {chain}"
+        return f"Hold {self.symbol or chain}"
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)

@@ -676,9 +676,14 @@ def render_positions_editor(snapshot: PortfolioSnapshot) -> None:
             "24h %": position.snapshot.price_change_24h if position.snapshot else 0.0,
             "Liquidity": position.snapshot.liquidity_usd if position.snapshot else 0.0,
             "Ecosystem": position.tag,
-            "Avg cost": position.avg_cost_usd,
+            # NaN rather than None for the empty cells: a None puts the column
+            # into object dtype and pandas then prints the literal "None" in
+            # every blank cell, which reads like a value rather than a gap.
+            "Avg cost": (position.avg_cost_usd if position.avg_cost_usd is not None
+                         else float("nan")),
             "Basis": position.basis_label,
-            "P&L": position.unrealized_pnl_usd,
+            "P&L": (position.unrealized_pnl_usd if position.unrealized_pnl_usd is not None
+                    else float("nan")),
             "_key": position.key,
         }
         for position in snapshot.positions

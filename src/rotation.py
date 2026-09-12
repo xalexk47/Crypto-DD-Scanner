@@ -590,10 +590,12 @@ def build_rotation_plan(
             if amount < settings.min_action_usd:
                 continue
             allocation = snapshot.chain_allocation_pct().get(heat.chain, 0.0)
-            turn = (
-                "and has started to turn up" if heat.state == "heating"
-                else "and is still cooling — scale in rather than all at once"
-            )
+            if heat.state == "heating":
+                turn = "and has started to turn up"
+            elif heat.state == "cooling":
+                turn = "and is still cooling — scale in rather than all at once"
+            else:
+                turn = "and has been quiet for a while — scale in rather than all at once"
             # The source is whichever chain is actually funding the move, not
             # simply the first action in the list.
             by_source: Dict[str, float] = {}

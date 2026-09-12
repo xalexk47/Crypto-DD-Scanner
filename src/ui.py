@@ -1002,9 +1002,13 @@ def render_portfolio_summary(
         col5.metric("Realized P&L", "—", help="No completed sells found in the history read so far.")
 
     if snapshot.dust_count:
+        # Dollar signs are escaped: Streamlit reads a pair of them as LaTeX
+        # math delimiters, which turns this line into gibberish.
+        dust_value = fmt_usd(snapshot.dust_usd).replace("$", "\\$")
+        threshold = f"{config.PORTFOLIO_DUST_USD:,.0f}"
         st.caption(
-            f"Plus {snapshot.dust_count} dust position(s) worth {fmt_usd(snapshot.dust_usd)} "
-            f"(under ${config.PORTFOLIO_DUST_USD:,.0f} each), included in the total."
+            f"Plus {snapshot.dust_count} dust position(s) worth {dust_value} "
+            f"(under \\${threshold} each), included in the total."
         )
 
 
@@ -1026,7 +1030,7 @@ def render_allocation(snapshot: PortfolioSnapshot, tag_rows: Optional[List[Dict[
                 '<span style="flex:1;"><span class="mdd-bar-track" '
                 'style="display:inline-block;width:100%;vertical-align:middle;">'
                 f'<span class="mdd-bar-fill" style="display:block;width:{pct:.1f}%;'
-                f'background:{score_color(min(pct * 2, 100))};height:9px;"></span>'
+                'background:var(--mdd-accent);height:9px;"></span>'
                 "</span></span>"
                 f'<span class="mdd-chain-val">{fmt_usd(value)} · {pct:.1f}%</span>'
                 "</div>"
@@ -1304,15 +1308,19 @@ def render_basis_detail(position: Position, report: Optional[Any] = None) -> Non
     for trade in sorted(trades, key=lambda t: t.timestamp, reverse=True):
         if trade.kind not in ("buy", "sell", "transfer_in", "transfer_out"):
             continue
+        # float("nan") rather than None: a None in a numeric column makes the
+        # whole column an object column, and pandas then prints the literal
+        # string "None" in every empty cell.
         rows.append({
             "When": trade.when,
             "Type": {"buy": "Buy", "sell": "Sell", "transfer_in": "Received",
                      "transfer_out": "Sent"}[trade.kind],
             "Quantity": abs(trade.quantity),
             "Paid in": trade.quote_symbol or ("—" if trade.kind.startswith("transfer") else "?"),
-            "Quote amount": trade.quote_quantity or None,
-            "USD": trade.usd_value,
-            "Unit price": trade.unit_price_usd,
+            "Quote amount": trade.quote_quantity or float("nan"),
+            "USD": trade.usd_value if trade.usd_value is not None else float("nan"),
+            "Unit price": (trade.unit_price_usd if trade.unit_price_usd is not None
+                           else float("nan")),
             "Note": trade.note or "",
         })
     if not rows:

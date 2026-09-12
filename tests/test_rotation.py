@@ -335,3 +335,31 @@ class TestBlending:
             snapshot, heats, settings=config.RotationSettings(max_position_pct=100.0))
         # Solana contributes the larger trim, so it is the source named.
         assert plan.actions_of("rotate")[0].chain == "solana"
+
+
+class TestActionCopy:
+    """The plan is read by a person, so it must name things the way the UI does."""
+
+    def test_headlines_use_chain_labels_not_internal_keys(self):
+        from src.models import RotationAction
+
+        trim = RotationAction(kind="trim", chain="bsc", reason="", symbol="BREW",
+                              pct_of_position=38.0)
+        rotate = RotationAction(kind="rotate", chain="bsc", dest_chain="robinhood",
+                                reason="", amount_usd=3_401.0)
+        assert trim.headline == "Trim 38% of BREW on BNB Chain"
+        assert "BNB Chain → Robinhood Chain" in rotate.headline
+        assert "bsc" not in rotate.headline
+
+    def test_a_cold_destination_is_not_described_as_still_cooling(self):
+        heats = [
+            ChainHeat(chain="bsc", heat=84.0, state="hot", confidence=1.0),
+            ChainHeat(chain="base", heat=22.0, state="cold", confidence=1.0),
+        ]
+        snapshot = PortfolioSnapshot(positions=[
+            position_for(value=5_000.0, change_24h=200.0, liquidity=9_000_000.0)])
+        plan = rotation.build_rotation_plan(
+            snapshot, heats, settings=config.RotationSettings(max_position_pct=100.0))
+        reason = plan.actions_of("rotate")[0].reason
+        assert "still cooling" not in reason
+        assert "quiet for a while" in reason
