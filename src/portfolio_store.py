@@ -27,7 +27,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from . import config
 from .models import ChainHeat, CostBasisReport, PortfolioSnapshot, Wallet
-from .utils import normalize_address, utcnow_iso
+from .utils import normalize_address, safe_float, safe_int, utcnow_iso
 
 logger = logging.getLogger(__name__)
 
@@ -506,6 +506,148 @@ def heat_history(chain: str, limit: int = 200, db_path: Optional[Path] = None) -
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not read heat history: %s", exc)
         return []
+
+
+# --------------------------------------------------------------------------
+# Backup / restore
+# --------------------------------------------------------------------------
+# A host wipes its filesystem whenever the app sleeps or redeploys, which takes
+# this database with it. Everything that took effort to build -- the wallet
+# list, your ecosystem tags, the cost bases you pinned, and the heat history
+# the rotation states are read from -- round-trips through one JSON file.
+BACKUP_VERSION = 1
+
+
+def export_state(db_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Everything worth keeping, as a plain dict ready for ``json.dumps``."""
+    state: Dict[str, Any] = {
+        "version": BACKUP_VERSION,
+        "exported_at": utcnow_iso(),
+        "wallets": [],
+        "position_meta": [],
+        "snapshots": [],
+        "chain_heat": [],
+    }
+    try:
+        init_db(db_path)
+        with _lock, _connect(db_path) as conn:
+            state["wallets"] = [dict(row) for row in conn.execute("SELECT * FROM wallets")]
+            state["position_meta"] = [
+                dict(row) for row in conn.execute("SELECT * FROM position_meta")
+            ]
+            state["snapshots"] = [
+                dict(row) for row in conn.execute(
+                    "SELECT taken_at, total_usd, payload FROM portfolio_snapshots "
+                    "ORDER BY id"
+                )
+            ]
+            state["chain_heat"] = [
+                dict(row) for row in conn.execute(
+                    "SELECT chain, taken_at, heat, state, payload FROM chain_heat ORDER BY id"
+                )
+            ]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not export state: %s", exc)
+    return state
+
+
+def import_state(
+    state: Dict[str, Any],
+    replace: bool = False,
+    db_path: Optional[Path] = None,
+) -> Dict[str, int]:
+    """Restore a backup. Returns how many rows of each kind were written.
+
+    Merges by default rather than replacing: restoring a backup onto a running
+    store should not silently delete wallets added since the backup was taken.
+    """
+    counts = {"wallets": 0, "position_meta": 0, "snapshots": 0, "chain_heat": 0}
+    if not isinstance(state, dict):
+        return counts
+    version = safe_int(state.get("version"), 0)
+    if version > BACKUP_VERSION:
+        logger.warning("Backup version %s is newer than this app understands", version)
+        return counts
+
+    try:
+        init_db(db_path)
+        with _lock, _connect(db_path) as conn:
+            if replace:
+                for table in ("wallets", "position_meta", "portfolio_snapshots", "chain_heat"):
+                    conn.execute(f"DELETE FROM {table}")
+
+            for row in state.get("wallets") or []:
+                if not row.get("address") or not row.get("chain"):
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO wallets (address, chain, label, added_at) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(address, chain) DO UPDATE SET label = excluded.label
+                    """,
+                    (normalize_address(row["address"]), row["chain"],
+                     row.get("label") or "", row.get("added_at") or utcnow_iso()),
+                )
+                counts["wallets"] += 1
+
+            for row in state.get("position_meta") or []:
+                if not row.get("address") or not row.get("chain"):
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO position_meta
+                        (chain, address, avg_cost_usd, tag, note, first_seen, basis_source,
+                         basis_coverage_pct, realized_pnl_usd, derived_at, basis_notes,
+                         updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(chain, address) DO UPDATE SET
+                        avg_cost_usd       = excluded.avg_cost_usd,
+                        tag                = excluded.tag,
+                        note               = excluded.note,
+                        first_seen         = excluded.first_seen,
+                        basis_source       = excluded.basis_source,
+                        basis_coverage_pct = excluded.basis_coverage_pct,
+                        realized_pnl_usd   = excluded.realized_pnl_usd,
+                        derived_at         = excluded.derived_at,
+                        basis_notes        = excluded.basis_notes,
+                        updated_at         = excluded.updated_at
+                    """,
+                    (row["chain"], normalize_address(row["address"]), row.get("avg_cost_usd"),
+                     row.get("tag") or "", row.get("note") or "", row.get("first_seen"),
+                     row.get("basis_source") or "", row.get("basis_coverage_pct"),
+                     row.get("realized_pnl_usd"), row.get("derived_at"),
+                     row.get("basis_notes"), row.get("updated_at") or utcnow_iso()),
+                )
+                counts["position_meta"] += 1
+
+            for row in state.get("snapshots") or []:
+                if not row.get("payload"):
+                    continue
+                conn.execute(
+                    "INSERT INTO portfolio_snapshots (taken_at, total_usd, payload) "
+                    "VALUES (?, ?, ?)",
+                    (row.get("taken_at") or utcnow_iso(), safe_float(row.get("total_usd")),
+                     row["payload"]),
+                )
+                counts["snapshots"] += 1
+
+            for row in state.get("chain_heat") or []:
+                if not row.get("chain") or not row.get("payload"):
+                    continue
+                conn.execute(
+                    "INSERT INTO chain_heat (chain, taken_at, heat, state, payload) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (row["chain"], row.get("taken_at") or utcnow_iso(),
+                     safe_float(row.get("heat")), row.get("state") or "cold", row["payload"]),
+                )
+                counts["chain_heat"] += 1
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not import state: %s", exc)
+    return counts
+
+
+def is_empty(db_path: Optional[Path] = None) -> bool:
+    """True when nothing has been set up yet — the state a host restart leaves."""
+    return not list_wallets(db_path=db_path)
 
 
 def clear_portfolio(db_path: Optional[Path] = None) -> None:

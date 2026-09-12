@@ -136,12 +136,25 @@ class TestDotenvLineEndings:
         monkeypatch.delenv("XAI_API_KEY", raising=False)
         monkeypatch.delenv("MEMEDD_LLM_PROVIDER", raising=False)
 
+        # Keep the original module object: re-importing creates a *new* one,
+        # and every module that did `from . import config` keeps a reference to
+        # the old one. Leaving the new object in sys.modules splits the suite's
+        # idea of what `config` is, so a later test can patch one object while
+        # the code under test reads the other.
+        original = sys.modules.get("src.config")
         sys.modules.pop("src.config", None)
-        reloaded = importlib.import_module("src.config")
+        try:
+            reloaded = importlib.import_module("src.config")
 
-        assert reloaded.XAI_API_KEY == "xai-test-123", label
-        assert reloaded.LLM_PROVIDER == "xai", label
-
-        # Leave the real module in place for the rest of the suite.
-        sys.modules.pop("src.config", None)
-        importlib.import_module("src.config")
+            assert reloaded.XAI_API_KEY == "xai-test-123", label
+            assert reloaded.LLM_PROVIDER == "xai", label
+        finally:
+            sys.modules.pop("src.config", None)
+            if original is not None:
+                sys.modules["src.config"] = original
+                # `from src import config` reads the attribute on the package,
+                # which the re-import rebound to the throwaway module. Without
+                # this, every later importer silently gets the wrong object.
+                setattr(sys.modules["src"], "config", original)
+            else:  # pragma: no cover - config is always imported by this point
+                importlib.import_module("src.config")

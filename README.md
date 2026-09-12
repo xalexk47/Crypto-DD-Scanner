@@ -508,6 +508,50 @@ python -m pytest tests/ -q
 
 ---
 
+## Deploying it (so you don't need a terminal)
+
+The app runs fine on your laptop, but Streamlit Community Cloud will host it
+free and give you a URL that works from your phone, with fully live data.
+
+1. **Push the branch** (already done if you cloned this repo) and sign in at
+   [share.streamlit.io](https://share.streamlit.io) with the GitHub account
+   that owns it.
+2. **New app** → pick the repo, the branch, and `app.py` as the entry point.
+3. **Advanced settings → Secrets**: paste the contents of
+   `.streamlit/secrets.toml.example`, filled in. At minimum set `APP_PASSWORD`
+   and `MEMEDD_EPHEMERAL_STORAGE = "1"`; add `ETHERSCAN_API_KEY` for BNB Chain.
+4. **Deploy.** First boot takes a couple of minutes while it installs
+   dependencies.
+
+### Two things to get right before you trust it
+
+**Lock it down.** A Streamlit Community Cloud app is *public by default* —
+anyone with the URL can open it, and this one displays your holdings. Do both
+of these:
+
+- In the app's settings, restrict viewers to your own email.
+- Set `APP_PASSWORD` in Secrets. The app then asks for it before rendering
+  anything. This is deliberate belt-and-braces: the viewer restriction is the
+  real control, the password is what saves you if that setting is ever wrong.
+
+Read-only access is the backstop — the app holds no key that can move a coin
+and has no code path that signs a transaction — but your addresses, balances
+and P&L are genuinely private information, so treat the URL as sensitive.
+
+**The disk is temporary.** Hosted apps sleep after a period of inactivity and
+come back with a fresh filesystem, which erases `data/history.sqlite3` — your
+wallet list, ecosystem tags, pinned cost bases, stored syncs and the heat
+history the rotation states are read from. Set
+`MEMEDD_EPHEMERAL_STORAGE = "1"` so the app warns you about this, then use
+**💾 Backup & restore** in the Portfolio tab: download a backup once you have
+things set up, and restore it in one click if the app comes back empty.
+Restoring merges by default, so it never deletes anything you added since.
+
+If you would rather keep everything on your own machine, don't deploy — the
+local install below behaves identically, and its disk is permanent.
+
+---
+
 ## API keys
 
 **None are required.** The v1 feature set runs entirely on free public endpoints:
@@ -524,6 +568,10 @@ python -m pytest tests/ -q
 | Token discovery on Base / BNB Chain | [Etherscan V2](https://docs.etherscan.io/etherscan-v2) | Free key — without it, Blockscout covers discovery |
 | Chain TVL & DEX volume | [DefiLlama](https://defillama.com/docs/api) | No |
 | Historical prices for cost basis | [DefiLlama coins API](https://defillama.com/docs/api) | No |
+
+On a host, these go in the Secrets box rather than `.env` — the app reads
+`st.secrets` and `.env` through the same names, so nothing else changes. See
+`.streamlit/secrets.toml.example`.
 
 No key in this table can move a coin. RPC and explorer endpoints are read-only,
 and the app has no code path that signs a transaction.
@@ -615,7 +663,7 @@ src/
   ui.py                 Reusable Streamlit components + CSS
   utils.py              Formatting, address parsing, safe coercion, TTL cache
   scripts/check_grok.py Diagnose your Grok key, models and X search access
-tests/                  406 unit + end-to-end tests (network, RPC and LLMs stubbed)
+tests/                  422 unit + end-to-end tests (network, RPC and LLMs stubbed)
 .streamlit/config.toml  Dark theme
 ```
 

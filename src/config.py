@@ -37,6 +37,40 @@ except Exception:  # pragma: no cover - dotenv missing is not fatal
     pass
 
 
+def _load_streamlit_secrets() -> None:
+    """Copy Streamlit Cloud's secrets into the environment.
+
+    A hosted app has no ``.env``: Streamlit Community Cloud injects settings
+    through ``st.secrets`` instead. Copying them into ``os.environ`` here means
+    every setting below reads from exactly one place, and the app behaves
+    identically on a laptop and on a host.
+
+    An existing environment variable always wins, so a local ``.env`` is never
+    overridden by a stale secret. Failure is silent by design: outside a
+    Streamlit run there are no secrets to read, which is not an error.
+    """
+    try:
+        import streamlit as st
+
+        secrets = st.secrets
+    except Exception:  # pragma: no cover - no Streamlit, or no secrets file
+        return
+
+    try:
+        items = list(secrets.items())
+    except Exception:  # pragma: no cover - secrets configured but unreadable
+        return
+
+    for key, value in items:
+        if isinstance(value, (dict, list)):
+            continue                      # only flat scalars map onto env vars
+        if key not in os.environ:
+            os.environ[str(key)] = str(value)
+
+
+_load_streamlit_secrets()
+
+
 # --------------------------------------------------------------------------
 # Paths
 # --------------------------------------------------------------------------
@@ -172,6 +206,23 @@ HTTP_USER_AGENT = os.getenv("MEMEDD_USER_AGENT", "MemeDD-Dashboard/1.0 (+https:/
 CACHE_TTL_TOKEN = int(os.getenv("MEMEDD_CACHE_TTL_TOKEN", "120"))
 CACHE_TTL_SCANNER = int(os.getenv("MEMEDD_CACHE_TTL_SCANNER", "180"))
 CACHE_TTL_SECURITY = int(os.getenv("MEMEDD_CACHE_TTL_SECURITY", "600"))
+
+
+# --------------------------------------------------------------------------
+# Hosting
+# --------------------------------------------------------------------------
+# Set this when the app is deployed somewhere with a public URL. Blank (the
+# default) means no gate at all, which is right for a laptop where the app is
+# only reachable from localhost. A hosted dashboard shows real holdings, so it
+# should never sit open behind a guessable address.
+APP_PASSWORD = os.getenv("APP_PASSWORD", "")
+
+# Hosts wipe the filesystem when an app sleeps or redeploys, taking the SQLite
+# store with it. Surfaced in the UI so the loss is expected rather than a
+# mystery, and paired with the backup/restore controls.
+EPHEMERAL_STORAGE = os.getenv("MEMEDD_EPHEMERAL_STORAGE", "").strip().lower() in (
+    "1", "true", "yes"
+)
 
 
 # --------------------------------------------------------------------------

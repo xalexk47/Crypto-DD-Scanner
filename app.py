@@ -11,6 +11,8 @@ logic lives in importable, testable modules.
 
 from __future__ import annotations
 
+import hmac
+import json
 import logging
 from typing import Dict, List, Optional
 
@@ -659,6 +661,72 @@ def render_wallet_manager() -> None:
         )
 
 
+def render_backup_controls() -> None:
+    """Download the whole store, or restore it from a file.
+
+    On a host this is not housekeeping, it is the difference between keeping
+    your setup and rebuilding it: the filesystem is wiped whenever the app
+    sleeps or redeploys.
+    """
+    with st.expander("💾 Backup & restore", expanded=config.EPHEMERAL_STORAGE
+                     and portfolio_store.is_empty()):
+        if config.EPHEMERAL_STORAGE:
+            st.warning(
+                "This app is running on a host that clears its disk when the app sleeps or "
+                "redeploys. Your wallets, tags, cost bases and heat history live on that "
+                "disk. Download a backup after you set things up, and restore it if the app "
+                "comes back empty.",
+                icon="⚠️",
+            )
+        st.caption(
+            "One file holds your wallet list, ecosystem tags, pinned cost bases, every "
+            "stored sync and the heat history the rotation states are read from."
+        )
+
+        col1, col2 = st.columns(2, gap="large")
+        with col1:
+            state = portfolio_store.export_state()
+            st.download_button(
+                "⬇️ Download backup",
+                data=json.dumps(state, indent=2),
+                file_name=f"memedd_backup_{state['exported_at'][:10]}.json",
+                mime="application/json",
+                **ui.stretch(),
+            )
+            st.caption(
+                f"{len(state['wallets'])} wallet(s) · {len(state['position_meta'])} "
+                f"annotation(s) · {len(state['snapshots'])} sync(s) · "
+                f"{len(state['chain_heat'])} heat reading(s)"
+            )
+        with col2:
+            uploaded = st.file_uploader("Restore from a backup", type="json",
+                                        label_visibility="collapsed")
+            replace = st.checkbox(
+                "Replace everything instead of merging",
+                help="Merging keeps anything added since the backup was taken.",
+            )
+            if uploaded is not None and st.button("♻️ Restore", **ui.stretch()):
+                try:
+                    payload = json.load(uploaded)
+                except (ValueError, UnicodeDecodeError) as exc:
+                    st.error(f"That file is not a readable backup: {exc}", icon="❌")
+                else:
+                    counts = portfolio_store.import_state(payload, replace=replace)
+                    if not any(counts.values()):
+                        st.warning(
+                            "Nothing was restored — the file held no recognisable rows.",
+                            icon="⚠️",
+                        )
+                    else:
+                        st.success(
+                            f"Restored {counts['wallets']} wallet(s), "
+                            f"{counts['position_meta']} annotation(s), "
+                            f"{counts['snapshots']} sync(s) and "
+                            f"{counts['chain_heat']} heat reading(s)."
+                        )
+                        st.rerun()
+
+
 def render_positions_editor(snapshot: PortfolioSnapshot) -> None:
     """Positions table, with avg cost and ecosystem tag editable in place."""
     if not snapshot.positions:
@@ -836,6 +904,7 @@ def tab_portfolio(settings: config.AppSettings) -> None:
     )
 
     render_wallet_manager()
+    render_backup_controls()
 
     wallets = portfolio_store.list_wallets()
     col1, col2 = st.columns([1, 3])
@@ -1191,7 +1260,37 @@ def tab_history(settings: config.AppSettings) -> None:
 # ==========================================================================
 # Main
 # ==========================================================================
+def require_access() -> None:
+    """Gate the app behind a password when one is configured.
+
+    Only active when ``APP_PASSWORD`` is set, so running locally is unchanged.
+    On a host the app is reachable by anyone who knows the URL, and this page
+    shows real holdings — the gate is the difference between a private
+    dashboard and a public one.
+    """
+    if not config.APP_PASSWORD:
+        return
+    if st.session_state.get("authenticated"):
+        return
+
+    ui.inject_css()
+    ui.hero("🧪 MemeDD Dashboard", "Private dashboard — enter the password to continue.")
+    with st.form("login"):
+        supplied = st.text_input("Password", type="password", key="password_input")
+        submitted = st.form_submit_button("Unlock", type="primary")
+    if submitted:
+        # compare_digest rather than ==: a plain comparison leaks the length of
+        # the matching prefix through timing.
+        if hmac.compare_digest(supplied or "", config.APP_PASSWORD):
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("That password is not right.", icon="🔒")
+    st.stop()
+
+
 def main() -> None:
+    require_access()
     init_state()
     ui.inject_css()
     settings = render_sidebar()
