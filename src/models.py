@@ -10,6 +10,7 @@ stable contract to consume.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .utils import age_hours, fmt_age, normalize_address
@@ -784,6 +785,16 @@ class Position:
     first_seen: str = ""               # first sync that saw this position
     priced: bool = True                # False when DexScreener has no pair
     source: str = ""                   # provider that reported the balance
+    # Where avg_cost_usd came from: "manual" (you typed it), "derived"
+    # (reconstructed from on-chain trades) or "" (unknown).
+    basis_source: str = ""
+    # Share of the current balance that reconstructed trades actually explain.
+    # Anything that arrived without a purchase -- an airdrop, a bridge, a
+    # transfer from an address you have not registered -- lowers this instead
+    # of being priced at zero.
+    basis_coverage_pct: Optional[float] = None
+    realized_pnl_usd: Optional[float] = None
+    basis_notes: List[str] = field(default_factory=list)
 
     @property
     def cost_basis_usd(self) -> Optional[float]:
@@ -806,6 +817,27 @@ class Position:
         return (self.value_usd - basis) / basis * 100.0
 
     @property
+    def basis_is_partial(self) -> bool:
+        """True when the average rests on less than the whole balance."""
+        if self.basis_source != "derived" or self.basis_coverage_pct is None:
+            return False
+        return self.basis_coverage_pct < 99.9
+
+    @property
+    def basis_label(self) -> str:
+        """Short provenance badge for the UI."""
+        if self.avg_cost_usd is None:
+            return "unknown"
+        if self.basis_source == "manual":
+            return "manual"
+        if self.basis_source == "derived":
+            coverage = self.basis_coverage_pct
+            if coverage is None:
+                return "derived"
+            return f"derived · {coverage:.0f}%"
+        return "unknown"
+
+    @property
     def key(self) -> str:
         """Stable identity for one holding.
 
@@ -824,6 +856,7 @@ class Position:
             cost_basis_usd=self.cost_basis_usd,
             unrealized_pnl_usd=self.unrealized_pnl_usd,
             unrealized_pnl_pct=self.unrealized_pnl_pct,
+            basis_label=self.basis_label,
         )
         return data
 
@@ -1003,3 +1036,106 @@ class RotationPlan:
             "heats": [heat.to_dict() for heat in self.heats],
             "actions": [action.to_dict() for action in self.actions],
         }
+
+
+# --------------------------------------------------------------------------
+# Cost basis
+# --------------------------------------------------------------------------
+# What a reconstructed transaction turned out to be, from your wallet's point
+# of view. "transfer_in" covers anything that arrived without a purchase --
+# an airdrop, a bridge, a send from an address you have not registered.
+TRADE_KINDS = ("buy", "sell", "transfer_in", "transfer_out", "internal_in", "internal_out")
+
+
+@dataclass
+class Trade:
+    """One reconstructed transaction touching one token."""
+
+    kind: str
+    timestamp: int                      # unix seconds
+    quantity: float                     # tokens in (+) or out (-) of the wallet
+    tx_hash: str = ""
+    chain: str = ""
+    token_address: str = ""
+    # What the other side of the swap was, when there was one.
+    quote_symbol: str = ""
+    quote_address: str = ""
+    quote_quantity: float = 0.0
+    quote_price_usd: Optional[float] = None
+    usd_value: Optional[float] = None   # None when the leg could not be priced
+    wallet: str = ""
+    note: str = ""
+
+    @property
+    def priced(self) -> bool:
+        return self.usd_value is not None
+
+    @property
+    def unit_price_usd(self) -> Optional[float]:
+        if self.usd_value is None or not self.quantity:
+            return None
+        return self.usd_value / abs(self.quantity)
+
+    @property
+    def when(self) -> str:
+        if not self.timestamp:
+            return ""
+        return datetime.fromtimestamp(self.timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data.update(priced=self.priced, unit_price_usd=self.unit_price_usd, when=self.when)
+        return data
+
+
+@dataclass
+class CostBasisReport:
+    """Weighted-average cost basis rebuilt from a wallet's own history."""
+
+    chain: str
+    token_address: str
+    symbol: str = ""
+    avg_cost_usd: Optional[float] = None
+    total_cost_usd: float = 0.0
+    realized_pnl_usd: float = 0.0
+    # Quantity the reconstructed trades account for, against what you hold now.
+    quantity_explained: float = 0.0
+    current_quantity: float = 0.0
+    trades: List[Trade] = field(default_factory=list)
+    notes: List[str] = field(default_factory=list)
+    method: str = "weighted_average"
+    derived_at: str = ""
+    ok: bool = True
+    error: str = ""
+
+    @property
+    def coverage_pct(self) -> Optional[float]:
+        """How much of your balance the derivation actually explains."""
+        if self.current_quantity <= 0:
+            return None
+        return min(100.0, self.quantity_explained / self.current_quantity * 100.0)
+
+    @property
+    def is_partial(self) -> bool:
+        coverage = self.coverage_pct
+        return coverage is not None and coverage < 99.9
+
+    @property
+    def buys(self) -> List[Trade]:
+        return [t for t in self.trades if t.kind == "buy"]
+
+    @property
+    def sells(self) -> List[Trade]:
+        return [t for t in self.trades if t.kind == "sell"]
+
+    @property
+    def unpriced_count(self) -> int:
+        return sum(1 for t in self.trades if not t.priced and t.kind in ("buy", "sell"))
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = {
+            key: value for key, value in asdict(self).items() if key != "trades"
+        }
+        data["trades"] = [trade.to_dict() for trade in self.trades]
+        data.update(coverage_pct=self.coverage_pct, is_partial=self.is_partial)
+        return data

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from . import config
-from .models import ChainHeat, PortfolioSnapshot, Wallet
+from .models import ChainHeat, CostBasisReport, PortfolioSnapshot, Wallet
 from .utils import normalize_address, utcnow_iso
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,15 @@ CREATE TABLE IF NOT EXISTS chain_heat (
     payload   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_heat_chain_time ON chain_heat(chain, taken_at DESC);
+
+CREATE TABLE IF NOT EXISTS price_cache (
+    chain       TEXT NOT NULL,
+    address     TEXT NOT NULL,
+    bucket      INTEGER NOT NULL,
+    price_usd   REAL NOT NULL,
+    fetched_at  TEXT NOT NULL,
+    PRIMARY KEY (chain, address, bucket)
+);
 """
 
 _lock = threading.Lock()
@@ -86,10 +95,33 @@ def _connect(db_path: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+# Columns added after the first release. Existing databases are upgraded in
+# place rather than recreated, so nobody loses the tags and costs they typed in.
+_ADDED_COLUMNS = {
+    "position_meta": {
+        "basis_source": "TEXT DEFAULT ''",       # "manual" | "derived" | ""
+        "basis_coverage_pct": "REAL",
+        "realized_pnl_usd": "REAL",
+        "derived_at": "TEXT",
+        "basis_notes": "TEXT",
+    },
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add any column this version expects but an older database lacks."""
+    for table, columns in _ADDED_COLUMNS.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for column, definition in columns.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_db(db_path: Optional[Path] = None) -> None:
-    """Create the schema if it does not exist (idempotent)."""
+    """Create the schema if it does not exist, and migrate it (idempotent)."""
     with _lock, _connect(db_path) as conn:
         conn.executescript(_SCHEMA)
+        _migrate(conn)
 
 
 # --------------------------------------------------------------------------
@@ -181,6 +213,7 @@ def set_position_meta(
     tag: Optional[str] = None,
     note: Optional[str] = None,
     first_seen: Optional[str] = None,
+    basis_source: Optional[str] = None,
     db_path: Optional[Path] = None,
 ) -> bool:
     """Upsert your annotations on one holding.
@@ -200,13 +233,15 @@ def set_position_meta(
             conn.execute(
                 """
                 INSERT INTO position_meta
-                    (chain, address, avg_cost_usd, tag, note, first_seen, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (chain, address, avg_cost_usd, tag, note, first_seen,
+                     basis_source, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chain, address) DO UPDATE SET
                     avg_cost_usd = excluded.avg_cost_usd,
                     tag          = excluded.tag,
                     note         = excluded.note,
                     first_seen   = excluded.first_seen,
+                    basis_source = excluded.basis_source,
                     updated_at   = excluded.updated_at
                 """,
                 (
@@ -216,6 +251,8 @@ def set_position_meta(
                     tag if tag is not None else ((existing["tag"] if existing else "") or ""),
                     note if note is not None else ((existing["note"] if existing else "") or ""),
                     first_seen or (existing["first_seen"] if existing else None) or utcnow_iso(),
+                    basis_source if basis_source is not None
+                    else ((existing["basis_source"] if existing else "") or ""),
                     utcnow_iso(),
                 ),
             )
@@ -251,6 +288,121 @@ def all_position_meta(db_path: Optional[Path] = None) -> Dict[str, Dict[str, Any
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not read position metadata: %s", exc)
         return {}
+
+
+def save_derived_basis(report: "CostBasisReport", db_path: Optional[Path] = None) -> str:
+    """Store a reconstructed basis, without ever clobbering one you typed in.
+
+    Returns what happened: ``"saved"``, ``"kept_manual"`` (your own figure was
+    left in place, realized P&L still recorded) or ``"failed"``.
+
+    Realized P&L is written either way: it comes from the sells that actually
+    happened, not from whichever average is on display.
+    """
+    try:
+        init_db(db_path)
+        key = (report.chain, normalize_address(report.token_address))
+        with _lock, _connect(db_path) as conn:
+            existing = conn.execute(
+                "SELECT * FROM position_meta WHERE chain = ? AND address = ?", key
+            ).fetchone()
+            manual = bool(
+                existing
+                and (existing["basis_source"] or "") == "manual"
+                and existing["avg_cost_usd"] is not None
+            )
+            notes = json.dumps(report.notes) if report.notes else None
+
+            if manual:
+                conn.execute(
+                    """
+                    UPDATE position_meta
+                       SET realized_pnl_usd = ?, derived_at = ?, basis_notes = ?, updated_at = ?
+                     WHERE chain = ? AND address = ?
+                    """,
+                    (report.realized_pnl_usd, report.derived_at or utcnow_iso(), notes,
+                     utcnow_iso(), key[0], key[1]),
+                )
+                return "kept_manual"
+
+            conn.execute(
+                """
+                INSERT INTO position_meta
+                    (chain, address, avg_cost_usd, tag, note, first_seen, basis_source,
+                     basis_coverage_pct, realized_pnl_usd, derived_at, basis_notes, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'derived', ?, ?, ?, ?, ?)
+                ON CONFLICT(chain, address) DO UPDATE SET
+                    avg_cost_usd       = excluded.avg_cost_usd,
+                    basis_source       = 'derived',
+                    basis_coverage_pct = excluded.basis_coverage_pct,
+                    realized_pnl_usd   = excluded.realized_pnl_usd,
+                    derived_at         = excluded.derived_at,
+                    basis_notes        = excluded.basis_notes,
+                    updated_at         = excluded.updated_at
+                """,
+                (
+                    key[0], key[1], report.avg_cost_usd,
+                    (existing["tag"] if existing else "") or "",
+                    (existing["note"] if existing else "") or "",
+                    (existing["first_seen"] if existing else None) or utcnow_iso(),
+                    report.coverage_pct, report.realized_pnl_usd,
+                    report.derived_at or utcnow_iso(), notes, utcnow_iso(),
+                ),
+            )
+        return "saved"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not save derived cost basis: %s", exc)
+        return "failed"
+
+
+# --------------------------------------------------------------------------
+# Historical price cache
+# --------------------------------------------------------------------------
+# A price at a past timestamp cannot change, so these rows never expire. That
+# makes re-deriving a basis almost free after the first run.
+def get_cached_price(
+    chain: str, address: str, bucket: int, db_path: Optional[Path] = None
+) -> Optional[float]:
+    try:
+        init_db(db_path)
+        with _lock, _connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT price_usd FROM price_cache WHERE chain = ? AND address = ? AND bucket = ?",
+                (chain, normalize_address(address), int(bucket)),
+            ).fetchone()
+        return float(row["price_usd"]) if row else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not read price cache: %s", exc)
+        return None
+
+
+def cache_prices(
+    rows: List[Dict[str, Any]], db_path: Optional[Path] = None
+) -> int:
+    """Store ``{chain, address, bucket, price_usd}`` rows. Returns the count."""
+    if not rows:
+        return 0
+    try:
+        init_db(db_path)
+        now = utcnow_iso()
+        with _lock, _connect(db_path) as conn:
+            conn.executemany(
+                """
+                INSERT INTO price_cache (chain, address, bucket, price_usd, fetched_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(chain, address, bucket) DO UPDATE SET
+                    price_usd = excluded.price_usd, fetched_at = excluded.fetched_at
+                """,
+                [
+                    (row["chain"], normalize_address(row["address"]), int(row["bucket"]),
+                     float(row["price_usd"]), now)
+                    for row in rows
+                ],
+            )
+        return len(rows)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not write price cache: %s", exc)
+        return 0
 
 
 # --------------------------------------------------------------------------

@@ -498,6 +498,72 @@ PORTFOLIO_DB_PATH = DATA_DIR / "history.sqlite3"
 
 
 # ==========================================================================
+# Cost basis: reconstructing what you paid
+# ==========================================================================
+# A balance read gives quantity; the wallet's transaction history gives entry
+# price. Pricing the non-stablecoin leg of a swap needs a price *at that
+# timestamp*, which DefiLlama's coins API serves free and without a key.
+DEFILLAMA_COINS_BASE = os.getenv("DEFILLAMA_COINS_URL", "https://coins.llama.fi")
+
+# Stablecoin legs are worth $1 and never need a lookup. This covers the large
+# majority of buys and keeps a full derivation down to a couple of calls.
+# Deliberately conservative: only hard-pegged, deep stables belong here, since
+# anything listed is priced at exactly 1.00 with no verification.
+STABLECOINS: Dict[str, Dict[str, str]] = {
+    "base": {
+        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": "USDC",
+        "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca": "USDbC",
+        "0x50c5725949a6f0c72e6c4a641f24049a917db0cb": "DAI",
+    },
+    "ethereum": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": "USDC",
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": "USDT",
+        "0x6b175474e89094c44da98b954eedeac495271d0f": "DAI",
+    },
+    "bsc": {
+        "0x55d398326f99059ff775485246999027b3197955": "USDT",
+        "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d": "USDC",
+        "0xe9e7cea3dedca5984780bafc599bd69add087d56": "BUSD",
+    },
+    "arbitrum": {
+        "0xaf88d065e77c8cc2239327c5edb3a432268e5831": "USDC",
+        "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9": "USDT",
+    },
+    "solana": {
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
+        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": "USDT",
+    },
+}
+
+# Gas is always excluded from cost basis. It is a real cost, but it is paid in
+# a different asset than most buys, so folding it into an average entry price
+# would make the number disagree with every trading app you compare it against
+# -- and it cannot be attributed consistently across chains, which makes a
+# configurable half-version worse than none.
+#
+# Tokens that arrived with no purchase (airdrop, bridge, a transfer from an
+# address you have not registered) have no knowable basis. Counting them as
+# free would inflate profit; by default they are excluded and reported as
+# uncovered instead.
+COST_BASIS_COUNT_AIRDROPS_AS_ZERO = os.getenv(
+    "MEMEDD_COST_BASIS_AIRDROPS_FREE", "0"
+).strip().lower() in ("1", "true", "yes")
+
+# Below this share of your balance explained by reconstructed trades, the
+# average is labelled partial rather than presented as the whole story.
+COST_BASIS_MIN_COVERAGE_PCT = float(os.getenv("MEMEDD_COST_BASIS_MIN_COVERAGE", "80"))
+
+# Solana costs one RPC call per transaction, so the scan is capped and the cap
+# is reported. A Helius/QuickNode URL raises what is practical here.
+COST_BASIS_MAX_SIGNATURES = int(os.getenv("MEMEDD_COST_BASIS_MAX_SIGNATURES", "1000"))
+# Signatures per getTransaction batch. Public RPCs reject very large batches.
+COST_BASIS_RPC_BATCH_SIZE = int(os.getenv("MEMEDD_COST_BASIS_RPC_BATCH", "25"))
+# Historical prices are immutable, so the price cache never expires; this only
+# bounds how precisely a timestamp is matched before reusing a cached price.
+COST_BASIS_PRICE_BUCKET_SECONDS = int(os.getenv("MEMEDD_COST_BASIS_PRICE_BUCKET", "3600"))
+
+
+# ==========================================================================
 # Rotation: chain-level liquidity flow
 # ==========================================================================
 DEFILLAMA_BASE = os.getenv("DEFILLAMA_BASE_URL", "https://api.llama.fi")

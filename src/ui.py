@@ -950,6 +950,23 @@ def _pnl_html(value: Optional[float], pct: Optional[float]) -> str:
     return f'<span class="{css}">{fmt_usd(value)}{suffix}</span>'
 
 
+def basis_badge(position: Position) -> str:
+    """Where this position's cost basis came from, and how complete it is."""
+    if position.avg_cost_usd is None:
+        return '<span class="mdd-badge">no basis</span>'
+    if position.basis_source == "manual":
+        return '<span class="mdd-badge">✍️ your figure</span>'
+    if position.basis_source == "derived":
+        coverage = position.basis_coverage_pct
+        if coverage is None:
+            return '<span class="mdd-badge">🧮 derived</span>'
+        colour = "#eab308" if position.basis_is_partial else "#22c55e"
+        label = f"🧮 derived · {coverage:.0f}% of your balance"
+        return (f'<span class="mdd-badge" style="color:{colour};border-color:{colour}55;">'
+                f'{label}</span>')
+    return '<span class="mdd-badge">basis unknown</span>'
+
+
 def render_portfolio_summary(
     snapshot: PortfolioSnapshot,
     previous_total: Optional[float] = None,
@@ -960,7 +977,9 @@ def render_portfolio_summary(
     pnl = sum(p.unrealized_pnl_usd or 0.0 for p in known_basis) if known_basis else None
     basis = sum(p.cost_basis_usd or 0.0 for p in known_basis) if known_basis else 0.0
 
-    col1, col2, col3, col4 = st.columns(4)
+    realized = [p.realized_pnl_usd for p in snapshot.positions if p.realized_pnl_usd]
+
+    col1, col2, col3, col4, col5 = st.columns(5)
     delta = None
     if previous_total is not None and previous_total > 0:
         change = total - previous_total
@@ -971,9 +990,16 @@ def render_portfolio_summary(
     if pnl is not None and basis > 0:
         col4.metric("Unrealized P&L", fmt_usd(pnl), delta=f"{pnl / basis * 100:+.1f}%")
     else:
-        # Never show a P&L of $0 when what we mean is "you have not told us
-        # what you paid".
-        col4.metric("Unrealized P&L", "—", help="Add an avg cost to a position to track P&L.")
+        # Never show a P&L of $0 when what we mean is "we do not know what you
+        # paid" -- a dash is the honest answer.
+        col4.metric("Unrealized P&L", "—",
+                    help="Sync derives this from your trade history; you can also type in an "
+                         "avg cost.")
+    if realized:
+        col5.metric("Realized P&L", fmt_usd(sum(realized)),
+                    help="Profit already taken, reconstructed from the sells in your history.")
+    else:
+        col5.metric("Realized P&L", "—", help="No completed sells found in the history read so far.")
 
     if snapshot.dust_count:
         st.caption(
@@ -1046,8 +1072,12 @@ def render_position_detail(position: Position, allocation_pct: float) -> None:
         ("Value", fmt_usd(position.value_usd)),
         ("Allocation", f"{allocation_pct:.1f}% of portfolio"),
         ("Unrealized P&L", _pnl_html(position.unrealized_pnl_usd, position.unrealized_pnl_pct)),
-        ("Avg cost", f"${position.avg_cost_usd:,.8f}".rstrip("0").rstrip(".")
-         if position.avg_cost_usd else "not set"),
+        ("Realized P&L",
+         _pnl_html(position.realized_pnl_usd, None) if position.realized_pnl_usd is not None
+         else '<span class="mdd-pnl-unk">none found</span>'),
+        ("Avg cost", (f"${position.avg_cost_usd:,.8f}".rstrip("0").rstrip(".") + " "
+                      + basis_badge(position)) if position.avg_cost_usd
+         else basis_badge(position)),
         ("Ecosystem", position.tag or "untagged"),
         ("Wallets holding", str(len(position.wallets) or 1)),
     ]
@@ -1254,3 +1284,50 @@ def render_rotation_plan(plan: RotationPlan) -> None:
             "These are suggestions with the arithmetic shown, not instructions — the app "
             "cannot and will not place a trade. Check each pool before you size a sell."
         )
+
+
+def render_basis_detail(position: Position, report: Optional[Any] = None) -> None:
+    """The trades behind an average, so the number can be checked rather than trusted."""
+    for note in position.basis_notes:
+        st.caption(f"ℹ️ {note}")
+
+    trades = getattr(report, "trades", None) if report is not None else None
+    if not trades:
+        return
+
+    st.markdown("**Reconstructed trades**")
+    st.caption(
+        "Read from your wallet's own history. If a buy is missing or looks wrong, it shows "
+        "up here rather than hiding inside the average."
+    )
+    rows = []
+    for trade in sorted(trades, key=lambda t: t.timestamp, reverse=True):
+        if trade.kind not in ("buy", "sell", "transfer_in", "transfer_out"):
+            continue
+        rows.append({
+            "When": trade.when,
+            "Type": {"buy": "Buy", "sell": "Sell", "transfer_in": "Received",
+                     "transfer_out": "Sent"}[trade.kind],
+            "Quantity": abs(trade.quantity),
+            "Paid in": trade.quote_symbol or ("—" if trade.kind.startswith("transfer") else "?"),
+            "Quote amount": trade.quote_quantity or None,
+            "USD": trade.usd_value,
+            "Unit price": trade.unit_price_usd,
+            "Note": trade.note or "",
+        })
+    if not rows:
+        return
+
+    import pandas as pd      # local import: only this view needs a DataFrame
+
+    st.dataframe(
+        pd.DataFrame(rows),
+        **stretch(),
+        hide_index=True,
+        column_config={
+            "Quantity": st.column_config.NumberColumn("Quantity", format="%.4g"),
+            "Quote amount": st.column_config.NumberColumn("Quote amount", format="%.6g"),
+            "USD": st.column_config.NumberColumn("USD", format="$%.2f"),
+            "Unit price": st.column_config.NumberColumn("Unit price", format="$%.6g"),
+        },
+    )

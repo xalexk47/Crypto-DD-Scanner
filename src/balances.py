@@ -35,9 +35,36 @@ import httpx
 
 from . import config
 from .models import Wallet
-from .utils import dig, normalize_address, safe_float, safe_int
+from .utils import TTLCache, dig, normalize_address, safe_float, safe_int
 
 logger = logging.getLogger(__name__)
+
+# Transfer history is fetched once per wallet and reused by both token
+# discovery and the cost-basis engine.
+_ledger_cache = TTLCache(ttl_seconds=config.CACHE_TTL_PORTFOLIO)
+
+
+def _etherscan_rows(payload: Any, provider: str) -> List[Dict[str, Any]]:
+    """Unwrap an Etherscan-shaped response into rows.
+
+    Both Etherscan V2 and Blockscout answer in this shape. An address with no
+    history is a legitimate empty answer; anything else is a failure and is
+    raised rather than returned as "no transactions".
+    """
+    result = (payload or {}).get("result")
+    if str((payload or {}).get("status", "")) != "1":
+        message = (payload or {}).get("message") or ""
+        if isinstance(result, list) and not result:
+            return []
+        if "no transactions" in str(message).lower() or "not found" in str(message).lower():
+            return []
+        raise RuntimeError(f"{provider}: {message or result or 'unknown error'}")
+    return result if isinstance(result, list) else []
+
+
+def clear_ledger_cache() -> None:
+    """Drop cached wallet history (used by the sidebar refresh button)."""
+    _ledger_cache.clear()
 
 # ERC-20 function selectors (first 4 bytes of the keccak hash of the signature).
 SELECTOR_BALANCE_OF = "0x70a08231"
@@ -210,6 +237,59 @@ class BlockscoutProvider:
         return result
 
 
+    def token_transfers(self, wallet: str) -> List[Dict[str, Any]]:
+        """ERC-20 transfer rows from Blockscout, in the Etherscan shape.
+
+        This is the only route to transaction history on a chain Etherscan V2
+        does not index -- Robinhood Chain among them.
+        """
+        if self.unavailable_reason():
+            return []
+        key = ("scout_tokentx", self.chain, normalize_address(wallet))
+        cached = _ledger_cache.get(key)
+        if cached is not None:
+            return cached
+
+        from .data_fetchers import FetchError, _get_json
+
+        params = {"module": "account", "action": "tokentx", "address": wallet, "sort": "desc"}
+        try:
+            payload = (
+                self._session(f"{self.base_url}/api", params) if self._session
+                else _get_json(f"{self.base_url}/api", params=params)
+            )
+        except FetchError as exc:
+            raise RuntimeError(f"Blockscout ({self.chain}) unreachable: {exc}") from exc
+
+        rows = _etherscan_rows(payload, f"Blockscout ({self.chain})")
+        _ledger_cache.set(key, rows)
+        return rows
+
+    def native_transactions(self, wallet: str) -> List[Dict[str, Any]]:
+        """Outer transactions, for buys paid in the chain's native coin."""
+        if self.unavailable_reason():
+            return []
+        key = ("scout_txlist", self.chain, normalize_address(wallet))
+        cached = _ledger_cache.get(key)
+        if cached is not None:
+            return cached
+
+        from .data_fetchers import FetchError, _get_json
+
+        params = {"module": "account", "action": "txlist", "address": wallet, "sort": "desc"}
+        try:
+            payload = (
+                self._session(f"{self.base_url}/api", params) if self._session
+                else _get_json(f"{self.base_url}/api", params=params)
+            )
+            rows = _etherscan_rows(payload, f"Blockscout ({self.chain})")
+        except (FetchError, RuntimeError) as exc:
+            logger.info("Blockscout txlist failed on %s: %s", self.chain, exc)
+            return []
+        _ledger_cache.set(key, rows)
+        return rows
+
+
 # --------------------------------------------------------------------------
 # EVM: Etherscan discovery + RPC balances
 # --------------------------------------------------------------------------
@@ -247,14 +327,20 @@ class EvmRpcProvider:
         return ""
 
     # -- discovery ---------------------------------------------------------
-    def discover_tokens(self, wallet: str) -> Dict[str, Dict[str, Any]]:
-        """Every ERC-20 this wallet has ever received or sent, with decimals.
+    def token_transfers(self, wallet: str) -> List[Dict[str, Any]]:
+        """Raw ERC-20 transfer rows for this wallet, newest first.
 
-        Etherscan's transfer rows carry ``tokenDecimal`` and ``tokenSymbol``,
-        so discovery also supplies the metadata a ``balanceOf`` call lacks.
+        Cached, because the cost-basis engine wants exactly the same rows that
+        discovery does -- fetching them twice would double the cost of a sync
+        for no new information.
         """
         if self.discovery_reason():
-            return {}
+            return []
+        key = ("tokentx", self.chain, normalize_address(wallet))
+        cached = _ledger_cache.get(key)
+        if cached is not None:
+            return cached
+
         from .data_fetchers import FetchError, _get_json
 
         chain_cfg = config.get_chain(self.chain)
@@ -276,19 +362,60 @@ class EvmRpcProvider:
         except FetchError as exc:
             raise RuntimeError(f"Etherscan discovery failed: {exc}") from exc
 
-        result = (payload or {}).get("result")
-        if str((payload or {}).get("status", "")) != "1":
-            message = (payload or {}).get("message") or ""
-            if isinstance(result, list) and not result:
-                return {}
-            if "no transactions" in str(message).lower():
-                return {}
-            raise RuntimeError(f"Etherscan: {message or result or 'unknown error'}")
-        if not isinstance(result, list):
-            return {}
+        rows = _etherscan_rows(payload, "Etherscan")
+        _ledger_cache.set(key, rows)
+        return rows
 
+    def native_transactions(self, wallet: str) -> List[Dict[str, Any]]:
+        """Outer transactions, which carry the native-coin leg of a swap.
+
+        A buy paid in ETH or BNB produces no ERC-20 transfer for the coin
+        spent, so without this the trade looks like it arrived from nowhere.
+        """
+        if self.discovery_reason():
+            return []
+        key = ("txlist", self.chain, normalize_address(wallet))
+        cached = _ledger_cache.get(key)
+        if cached is not None:
+            return cached
+
+        from .data_fetchers import FetchError, _get_json
+
+        chain_cfg = config.get_chain(self.chain)
+        params = {
+            "chainid": chain_cfg.etherscan_chain_id,
+            "module": "account",
+            "action": "txlist",
+            "address": wallet,
+            "page": 1,
+            "offset": max(1, min(config.PORTFOLIO_DISCOVERY_TRANSFERS, 10_000)),
+            "sort": "desc",
+            "apikey": self.api_key,
+        }
+        try:
+            payload = (
+                self._session(config.ETHERSCAN_BASE_URL, params) if self._session
+                else _get_json(config.ETHERSCAN_BASE_URL, params=params)
+            )
+        except FetchError as exc:
+            logger.info("Etherscan txlist failed on %s: %s", self.chain, exc)
+            return []
+        try:
+            rows = _etherscan_rows(payload, "Etherscan")
+        except RuntimeError as exc:
+            logger.info("Etherscan txlist failed on %s: %s", self.chain, exc)
+            return []
+        _ledger_cache.set(key, rows)
+        return rows
+
+    def discover_tokens(self, wallet: str) -> Dict[str, Dict[str, Any]]:
+        """Every ERC-20 this wallet has ever received or sent, with decimals.
+
+        Etherscan's transfer rows carry ``tokenDecimal`` and ``tokenSymbol``,
+        so discovery also supplies the metadata a ``balanceOf`` call lacks.
+        """
         tokens: Dict[str, Dict[str, Any]] = {}
-        for row in result:
+        for row in self.token_transfers(wallet):
             address = row.get("contractAddress") or ""
             if not address:
                 continue

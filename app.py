@@ -17,9 +17,9 @@ from typing import Dict, List, Optional
 import pandas as pd
 import streamlit as st
 
-from src import (balances, config, data_fetchers, history, llm, llm_analyzers,
-                 mindshare, portfolio, portfolio_store, report, rotation, ui,
-                 wallet_flow)
+from src import (balances, config, cost_basis, data_fetchers, history, llm,
+                 llm_analyzers, mindshare, portfolio, portfolio_store, report,
+                 rotation, ui, wallet_flow)
 from src.analyzer import analyze_many, analyze_token, scan
 from src.models import AnalysisResult, PortfolioSnapshot, ScanCandidate, Wallet
 from src.utils import fmt_usd, parse_addresses, score_emoji, short_address
@@ -118,6 +118,7 @@ def init_state() -> None:
         "active_tab": "analyzer",
         "portfolio": None,        # PortfolioSnapshot from the last sync
         "rotation_plan": None,    # RotationPlan from the last rotation refresh
+        "basis_reports": {},      # position key -> CostBasisReport from a derive run
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -268,6 +269,7 @@ def render_sidebar() -> config.AppSettings:
             mindshare.clear_cache()
             wallet_flow.clear_cache()
             rotation.clear_cache()
+            balances.clear_ledger_cache()
             st.session_state["cache_nonce"] += 1
             st.toast("Caches cleared — next request hits the APIs live.")
 
@@ -675,6 +677,7 @@ def render_positions_editor(snapshot: PortfolioSnapshot) -> None:
             "Liquidity": position.snapshot.liquidity_usd if position.snapshot else 0.0,
             "Ecosystem": position.tag,
             "Avg cost": position.avg_cost_usd,
+            "Basis": position.basis_label,
             "P&L": position.unrealized_pnl_usd,
             "_key": position.key,
         }
@@ -700,8 +703,11 @@ def render_positions_editor(snapshot: PortfolioSnapshot) -> None:
                 "Ecosystem", help='Group tag, e.g. "Brew". Positions sharing a tag roll up together.'),
             "Avg cost": st.column_config.NumberColumn(
                 "Avg cost", format="$%.8g",
-                help="Your average entry price. A wallet read cannot know this — "
-                     "fill it in and P&L becomes real. Leave blank for 'basis unknown'."),
+                help="Derived from your trade history where it can be. Type over it to "
+                     "pin your own figure — a derive run will never overwrite that."),
+            "Basis": st.column_config.TextColumn(
+                "Basis", disabled=True,
+                help="Where the average came from, and how much of your balance it covers."),
             "P&L": st.column_config.NumberColumn("P&L", format="$%.2f", disabled=True),
         },
     )
@@ -727,9 +733,13 @@ def render_positions_editor(snapshot: PortfolioSnapshot) -> None:
             if new_cost != position.avg_cost_usd:
                 if new_cost is None:
                     portfolio_store.clear_avg_cost(position.chain, position.address)
+                    position.basis_source = ""
                 else:
+                    # Typing a figure in pins it: later derive runs leave it alone.
                     portfolio_store.set_position_meta(
-                        position.chain, position.address, avg_cost_usd=new_cost)
+                        position.chain, position.address, avg_cost_usd=new_cost,
+                        basis_source="manual")
+                    position.basis_source = "manual"
                 position.avg_cost_usd = new_cost
                 changes += 1
         st.success(f"Saved {changes} change(s)." if changes else "Nothing to save.")
@@ -750,6 +760,66 @@ def render_equity_curve() -> None:
     frame = frame.dropna(subset=["taken_at"]).set_index("taken_at")
     st.markdown("##### 📈 Portfolio value")
     st.line_chart(frame["total_usd"], height=220)
+
+
+def render_basis_controls(position, snapshot: PortfolioSnapshot) -> None:
+    """Derive, re-derive or inspect the cost basis behind one position."""
+    chain_cfg = config.get_chain(position.chain)
+    solana = chain_cfg.address_kind == "solana"
+
+    col1, col2 = st.columns([1, 3])
+    label = "🧮 Re-derive cost basis" if position.basis_source == "derived" else "🧮 Derive cost basis"
+    clicked = col1.button(label, key=f"derive_{position.key}", **ui.stretch())
+    if position.basis_source == "manual":
+        col2.caption(
+            "Your own figure is pinned for this position. Clear the **Avg cost** cell above "
+            "to let a derived one take over."
+        )
+    elif solana:
+        col2.caption(
+            "Solana history costs one RPC call per transaction, so it runs on request. "
+            "A free Helius URL in `SOLANA_RPC_URL` makes it much faster."
+        )
+    else:
+        col2.caption(
+            "Reads this wallet's own trade history and prices each buy at the moment it "
+            "happened."
+        )
+
+    if clicked:
+        bar = st.progress(0.0, text="Reading history…")
+
+        def on_progress(label_text: str, fraction: float) -> None:
+            bar.progress(min(1.0, max(0.0, fraction)), text=f"Reading history… {label_text}")
+
+        report = cost_basis.derive_position(
+            position, progress=on_progress if solana else None
+        )
+        bar.empty()
+        if report is None or not report.ok:
+            st.warning(
+                (report.error if report else "No history could be read for this position."),
+                icon="🧮",
+            )
+            return
+        st.session_state.setdefault("basis_reports", {})[position.key] = report
+        if report.avg_cost_usd is None:
+            st.info(
+                "No priced purchase was found in the history — " + " ".join(report.notes),
+                icon="🧮",
+            )
+        else:
+            coverage = report.coverage_pct or 0.0
+            st.success(
+                f"Average entry ${report.avg_cost_usd:,.8g} across {coverage:.0f}% of your "
+                f"balance · realized P&L {fmt_usd(report.realized_pnl_usd)}."
+            )
+        st.rerun()
+
+    report = st.session_state.get("basis_reports", {}).get(position.key)
+    if report is not None or position.basis_notes:
+        with st.expander("🧮 How this cost basis was worked out", expanded=report is not None):
+            ui.render_basis_detail(position, report)
 
 
 def tab_portfolio(settings: config.AppSettings) -> None:
@@ -773,7 +843,10 @@ def tab_portfolio(settings: config.AppSettings) -> None:
     if sync_clicked:
         previous = portfolio_store.recent_snapshots(limit=1)
         st.session_state["previous_total"] = previous[0]["total_usd"] if previous else None
-        with st.spinner(f"Reading {len(wallets)} wallet(s) on-chain and pricing what they hold…"):
+        with st.spinner(
+            f"Reading {len(wallets)} wallet(s) on-chain, pricing what they hold and "
+            "working out what it cost you…"
+        ):
             st.session_state["portfolio"] = portfolio.sync_portfolio(
                 wallets=wallets, use_cache=False
             )
@@ -834,6 +907,7 @@ def tab_portfolio(settings: config.AppSettings) -> None:
     )
     position = snapshot.positions[selected]
     ui.render_position_detail(position, snapshot.allocation_pct(position))
+    render_basis_controls(position, snapshot)
 
     if st.button(f"🔬 Run full due diligence on {position.symbol or 'this token'}"):
         st.session_state["pending_address"] = position.address

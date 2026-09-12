@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from src import config, data_fetchers
+from src import balances, config, data_fetchers
 
 
 @pytest.fixture(autouse=True)
@@ -50,5 +50,7 @@ def isolate_ambient_config(monkeypatch):
 def clear_fetch_caches():
     """Stop cached responses leaking between tests."""
     data_fetchers.clear_caches()
+    balances.clear_ledger_cache()
     yield
     data_fetchers.clear_caches()
+    balances.clear_ledger_cache()

@@ -62,9 +62,14 @@ you hold. No trade ledger to maintain, no CSV to export from anywhere.
   ETH/BNB/SOL counts too: that is the dry powder a rotation actually moves.
 - **Allocation by chain and by ecosystem** — tag positions (e.g. `Brew`) and the
   whole cluster rolls up as one line with its own value-weighted 24h move.
-- **P&L, honestly** — a wallet read gives quantity, never entry price, so avg cost
-  is an editable column. Leave it blank and the app says *basis unknown* rather
-  than showing a confident zero; fill it in and P&L becomes real.
+- **Cost basis, reconstructed** — a balance read gives quantity, but the wallet's
+  *history* gives entry price. The app groups your transfers by transaction, reads
+  each swap ("1,000 BREW in, 250 USDT out"), prices the paid leg at that exact
+  timestamp, and walks the lots forward into a weighted average with realized P&L.
+  See [Cost basis](#cost-basis) below.
+- **P&L, honestly** — where basis cannot be reconstructed the app says so and
+  shows coverage, instead of a confident zero. Type over any figure to pin your
+  own; a derive run will never overwrite it.
 - **Equity curve** — every sync is stored locally, so portfolio history builds
   itself from the first sync onward.
 - **Nothing hidden** — dust is summed rather than dropped, unpriceable holdings are
@@ -111,6 +116,45 @@ absorb, and says so when it clamps), positions over the max-position cap get
 trimmed back to it regardless of heat, and moves too small to beat the spread are
 not suggested at all. Nothing is ever proposed into a chain the app could not
 actually read.
+
+### Cost basis
+
+Plugging in a wallet address is enough. Every position's average entry price is
+reconstructed from that wallet's own transaction history:
+
+1. **Group transfers by transaction.** A buy is "BREW came in, WBNB went out" in
+   one transaction. What went out *is* the price, in the quote token.
+2. **Price that leg at the moment it happened.** Stablecoin legs are $1 and need
+   no lookup at all — that covers most buys. Everything else is priced by
+   DefiLlama's free coins API at the transaction's own timestamp, then cached in
+   SQLite permanently, because a past price cannot change.
+3. **Walk the lots forward.** Buys pool into a weighted average; a sell removes a
+   proportional slice of the basis and books realized P&L.
+
+All your wallets on a chain are derived together as one book, so moving a bag
+between your own addresses cancels out instead of looking like a sale and a
+repurchase.
+
+**What it refuses to guess.** Tokens that arrived without a purchase — an
+airdrop, a bridge, a send from an address you haven't registered — have no
+knowable cost. They lower the report's **coverage** rather than being priced at
+zero, and selling them never invents profit: a sale draws proportionally from
+the explained and unexplained pools, so only the explained share's proceeds
+count. An average over 82% of your balance is labelled exactly that.
+
+Every figure is auditable: the position detail lists the reconstructed trades —
+date, side, quantity, what it was paid in, USD value, unit price — so a missing
+or mispriced buy is visible rather than buried inside an average. Type over any
+average to pin your own, and derivation will leave it alone from then on.
+
+Gas is never included. It is a real cost, but it is paid in a different asset
+than most buys, so folding it in would make the number disagree with every
+trading app you compare it against.
+
+EVM chains derive automatically on sync from history the app already fetches.
+Solana needs one RPC call per transaction, so it runs from a per-position
+button with a progress bar — a free Helius URL in `SOLANA_RPC_URL` makes it
+quick.
 
 ### 📡 Scanner
 Sweeps DexScreener for candidates on the selected chain, filters them
@@ -479,6 +523,7 @@ python -m pytest tests/ -q
 | Wallet balances (Solana) | Public Solana RPC | No (a Helius/QuickNode URL avoids throttling) |
 | Token discovery on Base / BNB Chain | [Etherscan V2](https://docs.etherscan.io/etherscan-v2) | Free key — without it, Blockscout covers discovery |
 | Chain TVL & DEX volume | [DefiLlama](https://defillama.com/docs/api) | No |
+| Historical prices for cost basis | [DefiLlama coins API](https://defillama.com/docs/api) | No |
 
 No key in this table can move a coin. RPC and explorer endpoints are read-only,
 and the app has no code path that signs a transaction.
@@ -564,12 +609,13 @@ src/
   portfolio.py          Positions, pricing, allocation, ecosystem tags, P&L
   portfolio_store.py    Local SQLite: wallets, annotations, snapshots, heat history
   rotation.py           Chain heat index, state machine, trim/rotate planner
+  cost_basis.py         Trade reconstruction, historical pricing, weighted average
   history.py            Local SQLite history
   report.py             Markdown / JSON export
   ui.py                 Reusable Streamlit components + CSS
   utils.py              Formatting, address parsing, safe coercion, TTL cache
   scripts/check_grok.py Diagnose your Grok key, models and X search access
-tests/                  361 unit + end-to-end tests (network, RPC and LLMs stubbed)
+tests/                  406 unit + end-to-end tests (network, RPC and LLMs stubbed)
 .streamlit/config.toml  Dark theme
 ```
 
@@ -647,10 +693,15 @@ Verify contracts by hand before trading on it.
 - **Price impact is an approximation.** Slippage uses a constant-product estimate
   (`x / (L/2 + x)`), which is the right order of magnitude but not a quote — v3
   concentrated liquidity in particular can behave very differently.
-- **Cost basis cannot be read from a wallet.** No free API returns the USD price
-  of each historical buy, so avg cost is something you type in. Until you do, the
-  app reports *basis unknown* and falls back to performance since the first sync
-  rather than inventing an entry price.
+- **Cost basis is reconstructed, not reported.** It is derived from transfers
+  grouped by transaction, which reads a plain swap exactly and can misread an
+  exotic one — a multi-hop route that leaves an intermediate token in your wallet,
+  or a buy paid for with an illiquid token DefiLlama cannot price. Those lots are
+  reported as uncovered rather than guessed at, and the trade list shows you
+  which ones they were.
+- **Coverage is capped by history depth.** Etherscan returns at most 10k transfer
+  rows per wallet and the Solana scan is capped too; buys older than that cannot
+  be seen, which shows up as reduced coverage with a note saying so.
 - **Heat needs history to read a trend.** The first refresh can only score the
   level; states (heating vs cooling) sharpen as stored readings accumulate, which
   is why every refresh is persisted locally.
@@ -668,7 +719,7 @@ Verify contracts by hand before trading on it.
 
 ## Roadmap
 
-- Optional lot ledger on top of the existing tables, for true realised P&L
+- FIFO realized P&L alongside the weighted average, for tax reporting
 - Alerting when a chain changes heat state or a position breaches its cap
 - Per-model cost/latency tracking and a cheap-model tier for scanning
 - Mindshare history, to score attention *trend* rather than a point reading

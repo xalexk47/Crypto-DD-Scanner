@@ -15,6 +15,7 @@ performance *since the first sync* is always available for free.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -185,6 +186,15 @@ def build_positions(
             position.tag = annotations.get("tag") or ""
             position.note = annotations.get("note") or ""
             position.first_seen = annotations.get("first_seen") or ""
+            position.basis_source = annotations.get("basis_source") or ""
+            position.basis_coverage_pct = annotations.get("basis_coverage_pct")
+            position.realized_pnl_usd = annotations.get("realized_pnl_usd")
+            stored_notes = annotations.get("basis_notes")
+            if stored_notes:
+                try:
+                    position.basis_notes = json.loads(stored_notes)
+                except (TypeError, ValueError):
+                    position.basis_notes = [str(stored_notes)]
 
             if position.value_usd < config.PORTFOLIO_DUST_USD:
                 dust_usd += position.value_usd
@@ -204,6 +214,7 @@ def sync_portfolio(
     manual_tokens: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     use_cache: bool = True,
     persist: bool = True,
+    derive_basis: bool = True,
     db_path: Optional[Any] = None,
 ) -> PortfolioSnapshot:
     """Read every wallet, price the result, and store the snapshot.
@@ -245,8 +256,49 @@ def sync_portfolio(
                     position.chain, position.address,
                     first_seen=first_seen_now, db_path=db_path,
                 )
+
+    # Basis is derived before the snapshot is written, so the stored payload
+    # carries it too -- otherwise a position's first snapshot would record it
+    # as having no cost basis when it does.
+    if derive_basis:
+        attach_cost_basis(snapshot, registered, db_path=db_path)
+    if persist:
         portfolio_store.record_snapshot(snapshot, db_path=db_path)
     return snapshot
+
+
+def attach_cost_basis(
+    snapshot: PortfolioSnapshot,
+    wallets: Optional[Sequence[Wallet]] = None,
+    only_missing: bool = True,
+    db_path: Optional[Any] = None,
+    progress: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Reconstruct cost basis for positions that do not have one yet.
+
+    Deliberately conservative about what it touches: a basis you typed in is
+    never replaced, and a derived one is recomputed only when explicitly asked
+    for, because the historical prices behind it cannot change.
+    """
+    from . import cost_basis      # imported here to keep module import cheap
+
+    reports = cost_basis.derive_for_positions(
+        snapshot.positions, wallets=wallets, only_missing=only_missing,
+        db_path=db_path, progress=progress,
+    )
+    for position in snapshot.positions:
+        report = reports.get(position.key)
+        if report is None or not report.ok:
+            continue
+        if position.avg_cost_usd is None and report.avg_cost_usd is not None:
+            position.avg_cost_usd = report.avg_cost_usd
+            position.basis_source = "derived"
+            position.basis_coverage_pct = report.coverage_pct
+        if report.realized_pnl_usd:
+            position.realized_pnl_usd = report.realized_pnl_usd
+        if report.notes:
+            position.basis_notes = list(report.notes)
+    return reports
 
 
 # --------------------------------------------------------------------------

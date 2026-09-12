@@ -457,7 +457,22 @@ def _gain_pct(position: Position) -> Optional[float]:
 
 
 def _gain_source(position: Position) -> str:
-    return "vs your avg cost" if position.unrealized_pnl_pct is not None else "24h"
+    """Name the number a trim is based on, including how the basis was set.
+
+    A trim suggestion should never rest on a figure whose origin is invisible:
+    "+180% vs your avg cost (derived, 82% coverage)" can be argued with, while
+    a bare "+180%" cannot.
+    """
+    if position.unrealized_pnl_pct is None:
+        return "24h"
+    if position.basis_source == "derived":
+        coverage = position.basis_coverage_pct
+        if coverage is not None and position.basis_is_partial:
+            return f"vs your derived avg cost, {coverage:.0f}% coverage"
+        return "vs your derived avg cost"
+    if position.basis_source == "manual":
+        return "vs the avg cost you entered"
+    return "vs your avg cost"
 
 
 def build_rotation_plan(
