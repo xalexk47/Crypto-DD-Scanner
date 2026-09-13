@@ -330,3 +330,41 @@ class TestOrchestration:
         ])
         assert len(result.balances) == 1
         assert any("rpc exploded" in w for w in result.warnings)
+
+
+class TestProviderDescription:
+    """The status line is read by someone deciding if setup is still pending."""
+
+    def test_a_ready_chain_says_so_without_naming_a_problem(self):
+        ready, detail = balances.describe_provider("base")
+        assert ready
+        assert "Ready" in detail
+        assert "no key needed" in detail
+
+    def test_solana_is_ready_with_no_key(self):
+        ready, detail = balances.describe_provider("solana")
+        assert ready and "Ready" in detail
+
+    def test_a_missing_key_is_not_reported_as_ready(self, monkeypatch):
+        monkeypatch.setattr(config, "ETHERSCAN_API_KEY", "")
+        monkeypatch.setattr(config, "BLOCKSCOUT_BASE_URLS", {})
+        ready, detail = balances.describe_provider("bsc")
+        assert not ready
+        assert "ETHERSCAN_API_KEY" in detail
+
+    def test_a_configured_key_flips_it_to_ready(self, monkeypatch):
+        monkeypatch.setattr(config, "ETHERSCAN_API_KEY", "K9F2MHQ4T7XZ")
+        monkeypatch.setattr(config, "BLOCKSCOUT_BASE_URLS", {})
+        ready, detail = balances.describe_provider("bsc")
+        assert ready
+        assert "your API key" in detail
+
+    def test_no_rpc_and_no_explorer_is_not_ready(self, monkeypatch):
+        monkeypatch.setattr(config, "BLOCKSCOUT_BASE_URLS", {})
+        monkeypatch.setitem(config.EVM_RPC_URLS, "robinhood", "")
+        ready, detail = balances.describe_provider("robinhood")
+        assert not ready
+        assert "ROBINHOOD_RPC_URL" in detail
+
+    def test_provider_status_still_returns_just_the_text(self):
+        assert balances.provider_status("base") == balances.describe_provider("base")[1]

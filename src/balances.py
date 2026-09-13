@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
@@ -642,20 +642,40 @@ class SolanaRpcProvider:
 # --------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------
-def provider_status(chain: str) -> str:
-    """One line describing how (or whether) this chain can be read."""
-    if config.get_chain(chain).address_kind == "solana":
-        return SolanaRpcProvider().unavailable_reason() or "Solana RPC ready"
+def describe_provider(chain: str) -> Tuple[bool, str]:
+    """``(ready, plain-language explanation)`` for reading one chain.
+
+    Written for someone deciding whether they still have setting up to do, so
+    it says what it means rather than naming the provider and leaving them to
+    infer whether that is good news.
+
+    "Ready" means a provider is configured, not that it has answered: only the
+    sync itself proves the connection.
+    """
+    chain_cfg = config.get_chain(chain)
+
+    if chain_cfg.address_kind == "solana":
+        reason = SolanaRpcProvider().unavailable_reason()
+        if reason:
+            return False, reason
+        return True, "Ready — reads Solana directly, no key needed."
 
     blockscout = BlockscoutProvider(chain)
     rpc = EvmRpcProvider(chain)
     if not blockscout.unavailable_reason():
-        return f"Blockscout ready ({blockscout.base_url})"
+        return True, "Ready — finds your tokens through Blockscout, no key needed."
     if not rpc.unavailable_reason() and not rpc.discovery_reason():
-        return "Etherscan discovery + RPC ready"
+        return True, "Ready — finds your tokens through Etherscan, using your API key."
     if not rpc.unavailable_reason():
-        return f"RPC ready, but {rpc.discovery_reason()}"
-    return rpc.unavailable_reason()
+        # The chain can be read, but nothing can be *found* on it, which reads
+        # as an empty wallet unless we say so.
+        return False, rpc.discovery_reason()
+    return False, rpc.unavailable_reason()
+
+
+def provider_status(chain: str) -> str:
+    """The explanation alone, for contexts that only show text."""
+    return describe_provider(chain)[1]
 
 
 def fetch_balances_for_wallet(

@@ -651,7 +651,8 @@ def render_wallet_manager() -> None:
                     f"{chain_cfg.label}: {problem}"
                     for problem in portfolio.wallet_input_errors(raw, chain)
                 )
-                st.caption(f"⚙️ {balances.provider_status(chain)}")
+                ready, detail = balances.describe_provider(chain)
+                st.caption(("✅ " if ready else "⚠️ ") + detail)
 
         for problem in problems:
             st.caption(f"⚠️ {problem}")
