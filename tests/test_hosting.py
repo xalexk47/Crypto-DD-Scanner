@@ -222,3 +222,66 @@ class TestGateInTheRealApp:
         at = app_test.from_file(self.APP, default_timeout=60).run()
         assert not at.exception
         assert len(at.tabs) == 6
+
+
+class TestPlaceholderDetection:
+    """Pasting the template unchanged is the most common setup mistake."""
+
+    @pytest.mark.parametrize("value", [
+        "your_key_here", "pick-something-long", "REPLACE-THIS-with-your-key",
+        "PASTE-YOUR-KEY-HERE", "<your key>", "changeme", "  your_api_key  ",
+    ])
+    def test_template_values_are_recognised(self, value):
+        assert config.is_placeholder(value)
+
+    @pytest.mark.parametrize("value", [
+        "", "K9F2MHQ4T7XZ1N8VB3RS", "correct horse battery staple",
+        "yourkeyisfine",          # a real key that merely starts with "your"
+    ])
+    def test_real_values_are_left_alone(self, value):
+        assert not config.is_placeholder(value)
+
+    def test_a_placeholder_key_counts_as_no_key(self, monkeypatch):
+        # Left as-is it would look configured, so the app would call the
+        # provider and get an auth error that reads like an outage.
+        monkeypatch.setattr(config, "SETUP_WARNINGS", [])
+        assert config._configured("ETHERSCAN_API_KEY", "your_key_here") == ""
+        assert config.SETUP_WARNINGS
+        assert "ETHERSCAN_API_KEY" in config.SETUP_WARNINGS[0]
+
+    def test_a_real_key_passes_through_without_a_warning(self, monkeypatch):
+        monkeypatch.setattr(config, "SETUP_WARNINGS", [])
+        assert config._configured("ETHERSCAN_API_KEY", "K9F2MHQ4T7XZ") == "K9F2MHQ4T7XZ"
+        assert config.SETUP_WARNINGS == []
+
+    def test_the_example_password_still_unlocks_the_app(self, monkeypatch):
+        # Blanking it would throw the door open; rejecting it would lock the
+        # owner out. It stays working, and the app says it is weak.
+        import importlib
+        import sys
+
+        monkeypatch.setenv("APP_PASSWORD", "pick-something-long")
+        original = sys.modules.get("src.config")
+        sys.modules.pop("src.config", None)
+        try:
+            fresh = importlib.import_module("src.config")
+            assert fresh.APP_PASSWORD == "pick-something-long"
+            assert any("APP_PASSWORD" in w for w in fresh.SETUP_WARNINGS)
+        finally:
+            sys.modules.pop("src.config", None)
+            if original is not None:
+                sys.modules["src.config"] = original
+                setattr(sys.modules["src"], "config", original)
+
+    def test_warnings_reach_the_locked_screen(self, monkeypatch, tmp_path):
+        streamlit_testing = pytest.importorskip("streamlit.testing.v1")
+        monkeypatch.setattr(config, "APP_PASSWORD", "pick-something-long")
+        monkeypatch.setattr(config, "SETUP_WARNINGS",
+                            ["**APP_PASSWORD** is still the example value."])
+        monkeypatch.setattr(config, "PORTFOLIO_DB_PATH", tmp_path / "w.sqlite3")
+        at = streamlit_testing.AppTest.from_file(
+            str(__import__("pathlib").Path(__file__).resolve().parent.parent / "app.py"),
+            default_timeout=60,
+        ).run()
+        # The person who needs this warning is the one staring at the login box.
+        assert any("APP_PASSWORD" in w.value for w in at.warning)

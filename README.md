@@ -518,8 +518,17 @@ free and give you a URL that works from your phone, with fully live data.
    that owns it.
 2. **New app** → pick the repo, the branch, and `app.py` as the entry point.
 3. **Advanced settings → Secrets**: paste the contents of
-   `.streamlit/secrets.toml.example`, filled in. At minimum set `APP_PASSWORD`
-   and `MEMEDD_EPHEMERAL_STORAGE = "1"`; add `ETHERSCAN_API_KEY` for BNB Chain.
+   `.streamlit/secrets.toml.example` and **replace every value** — the file is a
+   template, not a config. `APP_PASSWORD` is a password *you invent*;
+   `ETHERSCAN_API_KEY` is a free key from
+   [etherscan.io/apis](https://etherscan.io/apis) (register, then Dashboard →
+   API Keys → Add). Keep the quotes. Also set `MEMEDD_EPHEMERAL_STORAGE = "1"`.
+
+   Leaving a template value in place is silent otherwise — a fake API key looks
+   configured, so the app would call the provider and get an authentication
+   failure that reads like an outage. The app now recognises the template
+   values, treats them as unset, and warns you in the sidebar and on the login
+   screen.
 4. **Deploy.** First boot takes a couple of minutes while it installs
    dependencies.
 
@@ -663,7 +672,7 @@ src/
   ui.py                 Reusable Streamlit components + CSS
   utils.py              Formatting, address parsing, safe coercion, TTL cache
   scripts/check_grok.py Diagnose your Grok key, models and X search access
-tests/                  422 unit + end-to-end tests (network, RPC and LLMs stubbed)
+tests/                  441 unit + end-to-end tests (network, RPC and LLMs stubbed)
 .streamlit/config.toml  Dark theme
 ```
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 try:  # python-dotenv is optional at runtime
     import io
@@ -209,6 +209,52 @@ CACHE_TTL_SECURITY = int(os.getenv("MEMEDD_CACHE_TTL_SECURITY", "600"))
 
 
 # --------------------------------------------------------------------------
+# Setup guards
+# --------------------------------------------------------------------------
+# Every value in .streamlit/secrets.toml.example and .env.example is a
+# placeholder meant to be replaced. Pasting the template unchanged is an easy
+# and completely silent mistake: a placeholder API key looks configured, so the
+# app calls the provider and gets an authentication failure that reads like an
+# outage rather than a typo. These are recognised and treated as "not set".
+_PLACEHOLDERS = {
+    "your_key_here", "your-key-here", "your_api_key", "your-api-key",
+    "pick-something-long", "changeme", "change-me", "change_me",
+    "paste-your-key-here", "paste_your_key_here", "xxx", "todo",
+    "sk-...", "sk-ant-...", "xai-...",
+}
+
+# Problems worth telling the user about at startup, in plain language.
+SETUP_WARNINGS: List[str] = []
+
+
+# Anything opening with one of these is an instruction, not a value.
+_PLACEHOLDER_PREFIXES = ("replace", "paste", "your_", "your-", "enter ", "<")
+
+
+def is_placeholder(value: str) -> bool:
+    """True when a setting still holds the example value from the template.
+
+    Prefix matching as well as an exact list, so rewording the template cannot
+    quietly disable the check.
+    """
+    candidate = (value or "").strip().strip('"').lower()
+    if not candidate:
+        return False
+    return candidate in _PLACEHOLDERS or candidate.startswith(_PLACEHOLDER_PREFIXES)
+
+
+def _configured(name: str, value: str, advice: str = "") -> str:
+    """Return a setting, or blank it and record why when it was never filled in."""
+    if is_placeholder(value):
+        SETUP_WARNINGS.append(
+            f"**{name}** is still the example value from the template. "
+            + (advice or "Replace it with a real value.")
+        )
+        return ""
+    return value
+
+
+# --------------------------------------------------------------------------
 # Hosting
 # --------------------------------------------------------------------------
 # Set this when the app is deployed somewhere with a public URL. Blank (the
@@ -216,6 +262,15 @@ CACHE_TTL_SECURITY = int(os.getenv("MEMEDD_CACHE_TTL_SECURITY", "600"))
 # only reachable from localhost. A hosted dashboard shows real holdings, so it
 # should never sit open behind a guessable address.
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
+if is_placeholder(APP_PASSWORD):
+    # Deliberately left working rather than blanked: blanking it would throw
+    # the door open, and rejecting it would lock the owner out of their own
+    # dashboard. It is a weak password, so say so loudly instead.
+    SETUP_WARNINGS.append(
+        "**APP_PASSWORD** is still the example value, which is published in this "
+        "repository — anyone who finds your URL could guess it. Change it in your "
+        "host's Secrets settings."
+    )
 
 # Hosts wipe the filesystem when an app sleeps or redeploys, taking the SQLite
 # store with it. Surfaced in the UI so the loss is expected rather than a
@@ -228,9 +283,9 @@ EPHEMERAL_STORAGE = os.getenv("MEMEDD_EPHEMERAL_STORAGE", "").strip().lower() in
 # --------------------------------------------------------------------------
 # Optional API keys (LLM layer + authenticated GoPlus)
 # --------------------------------------------------------------------------
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+ANTHROPIC_API_KEY = _configured("ANTHROPIC_API_KEY", os.getenv("ANTHROPIC_API_KEY", ""))
+OPENAI_API_KEY = _configured("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+XAI_API_KEY = _configured("XAI_API_KEY", os.getenv("XAI_API_KEY", ""))
 GOPLUS_APP_KEY = os.getenv("GOPLUS_APP_KEY", "")
 GOPLUS_APP_SECRET = os.getenv("GOPLUS_APP_SECRET", "")
 
@@ -268,7 +323,11 @@ ENSEMBLE_PROVIDERS = tuple(
 # --------------------------------------------------------------------------
 # One free key covers every EVM chain via the chainid parameter: 5 calls/sec,
 # 100k/day. Solana is not an EVM chain and is not covered here.
-ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
+ETHERSCAN_API_KEY = _configured(
+    "ETHERSCAN_API_KEY", os.getenv("ETHERSCAN_API_KEY", ""),
+    "Get a free one at https://etherscan.io/apis — it covers BNB Chain and Base. "
+    "Until then, token discovery on those chains cannot run.",
+)
 ETHERSCAN_BASE_URL = os.getenv("ETHERSCAN_BASE_URL", "https://api.etherscan.io/v2/api")
 # Transfers pulled per token. Etherscan caps a single query at 10k rows.
 WALLET_FLOW_MAX_TRANSFERS = int(os.getenv("MEMEDD_WALLET_FLOW_MAX_TRANSFERS", "3000"))

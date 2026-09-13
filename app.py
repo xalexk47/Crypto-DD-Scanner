@@ -133,6 +133,12 @@ def render_sidebar() -> config.AppSettings:
     with st.sidebar:
         st.markdown("### ⚙️ Settings")
 
+        # Settings still holding their template value are the single most
+        # common setup mistake, and the most silent: say so before anything
+        # else in here.
+        for warning in config.SETUP_WARNINGS:
+            st.warning(warning, icon="⚠️")
+
         chain_keys = list(config.CHAINS.keys())
         chain = st.selectbox(
             "Chain",
@@ -1275,6 +1281,8 @@ def require_access() -> None:
 
     ui.inject_css()
     ui.hero("🧪 MemeDD Dashboard", "Private dashboard — enter the password to continue.")
+    for warning in config.SETUP_WARNINGS:
+        st.warning(warning, icon="⚠️")
     with st.form("login"):
         supplied = st.text_input("Password", type="password", key="password_input")
         submitted = st.form_submit_button("Unlock", type="primary")
