@@ -262,6 +262,29 @@ def _configured(name: str, value: str, advice: str = "") -> str:
 # only reachable from localhost. A hosted dashboard shows real holdings, so it
 # should never sit open behind a guessable address.
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
+
+
+def current_app_password() -> str:
+    """Read the password fresh, every time it is checked.
+
+    The module-level constant is a snapshot taken when this module was first
+    imported. A host keeps the Python process alive across reruns, so a
+    password changed in the host's Secrets editor would not take effect until
+    the process happened to restart -- and the symptom of that is the worst
+    possible one: the new password you just set is rejected, with nothing on
+    screen to explain why. Reading it live costs a dictionary lookup.
+    """
+    try:
+        import streamlit as st
+
+        value = st.secrets.get("APP_PASSWORD")
+        if value:
+            return str(value)
+    except Exception:  # pragma: no cover - no Streamlit, or no secrets file
+        pass
+    return os.getenv("APP_PASSWORD", "") or APP_PASSWORD
+
+
 if is_placeholder(APP_PASSWORD):
     # Deliberately left working rather than blanked: blanking it would throw
     # the door open, and rejecting it would lock the owner out of their own

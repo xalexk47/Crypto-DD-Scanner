@@ -1274,7 +1274,8 @@ def require_access() -> None:
     shows real holdings — the gate is the difference between a private
     dashboard and a public one.
     """
-    if not config.APP_PASSWORD:
+    password = config.current_app_password()
+    if not password:
         return
     if st.session_state.get("authenticated"):
         return
@@ -1287,13 +1288,21 @@ def require_access() -> None:
         supplied = st.text_input("Password", type="password", key="password_input")
         submitted = st.form_submit_button("Unlock", type="primary")
     if submitted:
-        # compare_digest rather than ==: a plain comparison leaks the length of
-        # the matching prefix through timing.
-        if hmac.compare_digest(supplied or "", config.APP_PASSWORD):
+        # Compared as UTF-8 bytes, not as text: compare_digest raises on any
+        # non-ASCII character, so a password with an accent -- or a curly quote
+        # picked up from a copy-paste -- would crash the login rather than
+        # reject it. compare_digest rather than == because a plain comparison
+        # leaks the length of the matching prefix through timing.
+        if hmac.compare_digest((supplied or "").encode("utf-8"), password.encode("utf-8")):
             st.session_state["authenticated"] = True
             st.rerun()
         else:
-            st.error("That password is not right.", icon="🔒")
+            st.error(
+                "That password is not right. If you have just changed it in your host's "
+                "Secrets settings, reboot the app there so it picks the new one up — until "
+                "then the previous password is still in force.",
+                icon="🔒",
+            )
     st.stop()
 
 

@@ -96,7 +96,7 @@ class TestSecretsBridge:
 
 class TestPasswordGate:
     def test_no_password_configured_means_no_gate(self, monkeypatch):
-        monkeypatch.setattr(config, "APP_PASSWORD", "")
+        monkeypatch.setattr(config, "current_app_password", lambda: "")
         import app
 
         # require_access returns immediately rather than calling st.stop().
@@ -194,7 +194,7 @@ class TestGateInTheRealApp:
         return streamlit_testing.AppTest
 
     def test_a_locked_app_renders_no_dashboard_at_all(self, app_test, monkeypatch):
-        monkeypatch.setattr(config, "APP_PASSWORD", "hunter2-long-enough")
+        monkeypatch.setattr(config, "current_app_password", lambda: "hunter2-long-enough")
         at = app_test.from_file(self.APP, default_timeout=60).run()
         assert not at.exception
         # Not one tab, not one number: st.stop() runs before any of it.
@@ -202,7 +202,7 @@ class TestGateInTheRealApp:
         assert len(at.text_input) == 1
 
     def test_the_wrong_password_keeps_it_locked(self, app_test, monkeypatch):
-        monkeypatch.setattr(config, "APP_PASSWORD", "hunter2-long-enough")
+        monkeypatch.setattr(config, "current_app_password", lambda: "hunter2-long-enough")
         at = app_test.from_file(self.APP, default_timeout=60).run()
         at.text_input[0].set_value("nope").run()
         at.button[0].click().run()
@@ -210,7 +210,7 @@ class TestGateInTheRealApp:
         assert at.error
 
     def test_the_right_password_opens_it(self, app_test, monkeypatch):
-        monkeypatch.setattr(config, "APP_PASSWORD", "hunter2-long-enough")
+        monkeypatch.setattr(config, "current_app_password", lambda: "hunter2-long-enough")
         at = app_test.from_file(self.APP, default_timeout=60).run()
         at.text_input[0].set_value("hunter2-long-enough").run()
         at.button[0].click().run()
@@ -218,7 +218,7 @@ class TestGateInTheRealApp:
         assert len(at.tabs) == 6
 
     def test_no_password_configured_means_no_gate(self, app_test, monkeypatch):
-        monkeypatch.setattr(config, "APP_PASSWORD", "")
+        monkeypatch.setattr(config, "current_app_password", lambda: "")
         at = app_test.from_file(self.APP, default_timeout=60).run()
         assert not at.exception
         assert len(at.tabs) == 6
@@ -275,7 +275,7 @@ class TestPlaceholderDetection:
 
     def test_warnings_reach_the_locked_screen(self, monkeypatch, tmp_path):
         streamlit_testing = pytest.importorskip("streamlit.testing.v1")
-        monkeypatch.setattr(config, "APP_PASSWORD", "pick-something-long")
+        monkeypatch.setattr(config, "current_app_password", lambda: "pick-something-long")
         monkeypatch.setattr(config, "SETUP_WARNINGS",
                             ["**APP_PASSWORD** is still the example value."])
         monkeypatch.setattr(config, "PORTFOLIO_DB_PATH", tmp_path / "w.sqlite3")
@@ -285,3 +285,39 @@ class TestPlaceholderDetection:
         ).run()
         # The person who needs this warning is the one staring at the login box.
         assert any("APP_PASSWORD" in w.value for w in at.warning)
+
+
+class TestPasswordRobustness:
+    """Failures here lock the owner out of their own dashboard."""
+
+    def test_a_password_with_an_accent_does_not_crash_the_login(self, monkeypatch, tmp_path):
+        # hmac.compare_digest raises on non-ASCII text, so this used to be a
+        # traceback rather than a login.
+        streamlit_testing = pytest.importorskip("streamlit.testing.v1")
+        monkeypatch.setattr(config, "current_app_password", lambda: "café–dashboard")
+        monkeypatch.setattr(config, "PORTFOLIO_DB_PATH", tmp_path / "a.sqlite3")
+        app_path = str(__import__("pathlib").Path(__file__).resolve().parent.parent / "app.py")
+
+        at = streamlit_testing.AppTest.from_file(app_path, default_timeout=60).run()
+        at.text_input[0].set_value("café–dashboard").run()
+        at.button[0].click().run()
+        assert not at.exception
+        assert len(at.tabs) == 6
+
+    def test_a_changed_password_takes_effect_without_a_restart(self, monkeypatch):
+        # The constant is a snapshot from import time; a host keeps the process
+        # alive across reruns, so the live reader is what makes a secrets edit
+        # actually land.
+        monkeypatch.setattr(config, "APP_PASSWORD", "the-old-one")
+        monkeypatch.setenv("APP_PASSWORD", "the-new-one")
+        assert config.current_app_password() == "the-new-one"
+
+    def test_falls_back_to_the_import_time_value(self, monkeypatch):
+        monkeypatch.delenv("APP_PASSWORD", raising=False)
+        monkeypatch.setattr(config, "APP_PASSWORD", "from-import")
+        assert config.current_app_password() == "from-import"
+
+    def test_no_password_anywhere_reads_as_no_gate(self, monkeypatch):
+        monkeypatch.delenv("APP_PASSWORD", raising=False)
+        monkeypatch.setattr(config, "APP_PASSWORD", "")
+        assert config.current_app_password() == ""
